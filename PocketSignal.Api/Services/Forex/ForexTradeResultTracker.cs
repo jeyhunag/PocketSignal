@@ -253,7 +253,16 @@ public class ForexTradeResultTracker : IForexTradeResultTracker
             });
         }
 
+        candles = candles
+            .OrderBy(x => x.Time)
+            .ToList();
+
+        NormalizeProviderTimesToUtc(candles);
+
+        var nowUtc = DateTime.UtcNow;
+
         return candles
+            .Where(x => x.Time <= nowUtc.AddMinutes(2))
             .OrderBy(x => x.Time)
             .ToList();
     }
@@ -268,20 +277,21 @@ public class ForexTradeResultTracker : IForexTradeResultTracker
             return;
         }
 
-        if (trade.Result == "PENDING" &&
-            DateTime.UtcNow > trade.ExpiresAtUtc)
-        {
-            MarkExpired(trade);
+        var nowUtc = DateTime.UtcNow;
+
+        var evaluationStartUtc = GetFirstEvaluatableCandleTime(trade.CreatedAtUtc);
+        var latestAllowedCandleUtc = GetLastClosedOneMinuteCandleTime(nowUtc);
+
+        if (latestAllowedCandleUtc < evaluationStartUtc)
             return;
-        }
 
         var tradeCandles = candles
-            .Where(x => x.Time >= trade.CreatedAtUtc.AddMinutes(-2))
+            .Where(x =>
+                x.Time >= evaluationStartUtc &&
+                x.Time <= latestAllowedCandleUtc &&
+                x.Time <= trade.ExpiresAtUtc)
             .OrderBy(x => x.Time)
             .ToList();
-
-        if (tradeCandles.Count == 0)
-            return;
 
         foreach (var candle in tradeCandles)
         {
@@ -303,6 +313,15 @@ public class ForexTradeResultTracker : IForexTradeResultTracker
             }
         }
 
+        if (trade.Result == "PENDING" && nowUtc > trade.ExpiresAtUtc)
+        {
+            MarkExpired(trade);
+            return;
+        }
+
+        if (tradeCandles.Count == 0)
+            return;
+
         var last = tradeCandles.Last();
 
         trade.ExitPrice = last.Close;
@@ -311,7 +330,7 @@ public class ForexTradeResultTracker : IForexTradeResultTracker
             trade.EntryPrice,
             last.Close);
 
-        trade.CheckedAtUtc = DateTime.UtcNow;
+        trade.CheckedAtUtc = nowUtc;
     }
 
     private static void EvaluateLongTrade(
@@ -630,5 +649,76 @@ public class ForexTradeResultTracker : IForexTradeResultTracker
         }
 
         return null;
+    }
+
+    private static void NormalizeProviderTimesToUtc(List<Candle> candles)
+    {
+        if (candles.Count == 0)
+            return;
+
+        var nowUtc = DateTime.UtcNow;
+        var latestCandleTime = candles.Max(x => x.Time);
+
+        if (latestCandleTime > nowUtc.AddMinutes(2))
+        {
+            var difference = latestCandleTime - nowUtc;
+            var offsetHours = (int)Math.Round(
+                difference.TotalHours,
+                MidpointRounding.AwayFromZero);
+
+            if (offsetHours >= 1 && offsetHours <= 14)
+            {
+                foreach (var candle in candles)
+                {
+                    candle.Time = DateTime.SpecifyKind(
+                        candle.Time.AddHours(-offsetHours),
+                        DateTimeKind.Utc);
+                }
+            }
+        }
+        else
+        {
+            foreach (var candle in candles)
+            {
+                candle.Time = DateTime.SpecifyKind(
+                    candle.Time,
+                    DateTimeKind.Utc);
+            }
+        }
+    }
+
+    private static DateTime GetFirstEvaluatableCandleTime(DateTime createdAtUtc)
+    {
+        createdAtUtc = DateTime.SpecifyKind(createdAtUtc, DateTimeKind.Utc);
+
+        var candleMinute = new DateTime(
+            createdAtUtc.Year,
+            createdAtUtc.Month,
+            createdAtUtc.Day,
+            createdAtUtc.Hour,
+            createdAtUtc.Minute,
+            0,
+            DateTimeKind.Utc);
+
+        if (createdAtUtc.Second == 0 && createdAtUtc.Millisecond == 0)
+            return candleMinute;
+
+        return candleMinute.AddMinutes(1);
+    }
+
+    private static DateTime GetLastClosedOneMinuteCandleTime(DateTime nowUtc)
+    {
+        nowUtc = DateTime.SpecifyKind(nowUtc, DateTimeKind.Utc);
+
+        var currentMinute = new DateTime(
+            nowUtc.Year,
+            nowUtc.Month,
+            nowUtc.Day,
+            nowUtc.Hour,
+            nowUtc.Minute,
+            0,
+            DateTimeKind.Utc);
+
+        return currentMinute.AddMinutes(-1);
     }
 }

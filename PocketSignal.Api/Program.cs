@@ -50,7 +50,7 @@ builder.Services.AddSingleton<ISignalResultTracker, SignalResultTracker>();
 builder.Services.AddSingleton<IDailyStatsService, DailyStatsService>();
 
 // Forex services
-builder.Services.AddScoped<IForexSignalService, ForexSignalService>();
+builder.Services.AddScoped<IForexSignalService, BalancedForexSignalService>();
 builder.Services.AddScoped<IForexNotificationService, ForexNotificationService>();
 builder.Services.AddScoped<IForexSignalDatabaseService, ForexSignalDatabaseService>();
 builder.Services.AddScoped<IForexChartImageService, ForexChartImageService>();

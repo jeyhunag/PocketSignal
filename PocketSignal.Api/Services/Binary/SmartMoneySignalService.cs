@@ -9,6 +9,7 @@ namespace PocketSignal.Api.Services.Binary;
 public class SmartMoneySignalService : ISmartSignalService
 {
     private readonly IMarketDataService _marketDataService;
+    private readonly BinaryContextFilter _contextFilter = new();
 
     private const int MinimumScore = 82;
 
@@ -144,8 +145,65 @@ public class SmartMoneySignalService : ISmartSignalService
             };
         }
 
+        var contextResult = _contextFilter.Validate(
+            best.Direction,
+            m15,
+            m5,
+            m1);
+
+        if (!contextResult.IsAllowed)
+        {
+            var contextWaitReasons = new List<string>
+            {
+                $"Best direction: {best.Direction}",
+                $"Original score: {best.Score}",
+                $"Context decision: {contextResult.Decision}",
+                $"Risk level: {contextResult.RiskLevel}",
+                "Binary context filter signalı blokladı."
+            };
+
+            contextWaitReasons.AddRange(contextResult.Reasons);
+            contextWaitReasons.AddRange(best.Reasons);
+
+            return new SmartTradeSignal
+            {
+                Symbol = symbol,
+                Direction = "WAIT",
+                ExpiryMinutes = 0,
+                ExpiryReason = "Expiry secilmedi: context filter riskli zona tapdi.",
+                Confidence = Math.Max(0, best.Score - contextResult.ScorePenalty),
+                Grade = "NO_TRADE",
+                Message = $"{symbol} WAIT",
+                EntryType = "NO_ENTRY",
+                ValidForSeconds = 0,
+                LastClose = lastClose,
+                InvalidIf = "",
+                Reasons = contextWaitReasons,
+                SideAnalyses = new List<SideAnalysis>
+                {
+                    new SideAnalysis
+                    {
+                        Direction = "LONG",
+                        Score = longScore.Score,
+                        Reasons = longScore.Reasons
+                    },
+                    new SideAnalysis
+                    {
+                        Direction = "SHORT",
+                        Score = shortScore.Score,
+                        Reasons = shortScore.Reasons
+                    }
+                },
+                CreatedAtUtc = DateTime.UtcNow
+            };
+        }
+
         var expiryDecision = SelectSmartExpiry(best, m15, m5, m1);
         var grade = GetGrade(best.Score);
+
+        var finalReasons = new List<string>();
+        finalReasons.AddRange(best.Reasons);
+        finalReasons.AddRange(contextResult.Reasons);
 
         return new SmartTradeSignal
         {
@@ -160,7 +218,7 @@ public class SmartMoneySignalService : ISmartSignalService
             ValidForSeconds = expiryDecision.ValidForSeconds,
             LastClose = lastClose,
             InvalidIf = best.InvalidIf,
-            Reasons = best.Reasons,
+            Reasons = finalReasons,
             SideAnalyses = new List<SideAnalysis>
             {
                 new SideAnalysis
@@ -507,15 +565,13 @@ public class SmartMoneySignalService : ISmartSignalService
 
             return lastSwingHigh != null && lastClose > lastSwingHigh.Price;
         }
-        else
-        {
-            var lastSwingLow = swings
-                .Where(x => x.Kind == SwingKind.Low)
-                .OrderBy(x => x.Time)
-                .LastOrDefault();
 
-            return lastSwingLow != null && lastClose < lastSwingLow.Price;
-        }
+        var lastSwingLow = swings
+            .Where(x => x.Kind == SwingKind.Low)
+            .OrderBy(x => x.Time)
+            .LastOrDefault();
+
+        return lastSwingLow != null && lastClose < lastSwingLow.Price;
     }
 
     private static List<PriceZone> DetectM5Zones(List<Candle> candles)

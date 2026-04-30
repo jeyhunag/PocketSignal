@@ -86,6 +86,64 @@ public class AdminController : ControllerBase
         return Ok(charts);
     }
 
+    [HttpPost("charts/delete")]
+    public IActionResult DeleteChart([FromBody] AdminChartDeleteRequest request)
+    {
+        if (request == null)
+            return BadRequest(new { message = "Request bosdur." });
+
+        var deleteResult = TryDeleteChart(
+            request.FolderName,
+            request.FileName);
+
+        if (!deleteResult.Success)
+            return BadRequest(new { message = deleteResult.Message });
+
+        return Ok(new { message = deleteResult.Message });
+    }
+
+    [HttpPost("charts/clear")]
+    public IActionResult ClearCharts([FromBody] AdminChartClearRequest request)
+    {
+        if (request == null)
+            return BadRequest(new { message = "Request bosdur." });
+
+        if (!IsAllowedChartFolder(request.FolderName))
+            return BadRequest(new { message = "Chart folder icaze verilmir." });
+
+        var chartDirectory = GetChartDirectory(request.FolderName);
+
+        if (!Directory.Exists(chartDirectory))
+        {
+            return Ok(new
+            {
+                removed = 0,
+                message = "Silinecek chart tapilmadi."
+            });
+        }
+
+        var removed = 0;
+
+        foreach (var file in Directory.GetFiles(chartDirectory, "*.png"))
+        {
+            try
+            {
+                System.IO.File.Delete(file);
+                removed++;
+            }
+            catch
+            {
+                // Bir fayl silinmese, digerlerine davam edirik.
+            }
+        }
+
+        return Ok(new
+        {
+            removed,
+            message = $"{removed} chart silindi."
+        });
+    }
+
     private string BuildHtml(AdminRuntimeSettings settings)
     {
         var binaryRadios = BuildRadioButtons(
@@ -192,6 +250,7 @@ public class AdminController : ControllerBase
             display: flex;
             gap: 12px;
             align-items: center;
+            flex-wrap: wrap;
         }
 
         button {
@@ -206,6 +265,21 @@ public class AdminController : ControllerBase
 
         button:hover {
             background: #16a34a;
+        }
+
+        .danger-button {
+            background: #ef4444;
+            color: white;
+        }
+
+        .danger-button:hover {
+            background: #dc2626;
+        }
+
+        .small-button {
+            padding: 8px 12px;
+            border-radius: 10px;
+            font-size: 13px;
         }
 
         .status {
@@ -247,31 +321,61 @@ public class AdminController : ControllerBase
             padding: 18px;
         }
 
+        .chart-section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+
+        .chart-section-header h2 {
+            margin: 0;
+        }
+
         .chart-grid {
             display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 18px;
+            grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+            gap: 14px;
         }
 
         .chart-card {
             background: #181f26;
             border: 1px solid #2b3540;
             border-radius: 16px;
-            padding: 12px;
+            padding: 10px;
         }
 
         .chart-card img {
             width: 100%;
+            max-height: 180px;
+            object-fit: contain;
             border-radius: 12px;
             border: 1px solid #2b3540;
             display: block;
+            background: #0f151b;
         }
 
         .chart-title {
-            font-size: 14px;
+            font-size: 12px;
             color: #d4d4d8;
             margin-bottom: 8px;
             word-break: break-all;
+            line-height: 1.3;
+        }
+
+        .chart-card-footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            margin-top: 8px;
+        }
+
+        .chart-date {
+            font-size: 12px;
+            color: #a1a1aa;
         }
 
         @media (max-width: 850px) {
@@ -363,7 +467,13 @@ public class AdminController : ControllerBase
     </div>
 
     <div class="chart-section">
-        <h2>Son Binary chart-lar</h2>
+        <div class="chart-section-header">
+            <h2>Son Binary chart-lar</h2>
+            <button class="danger-button small-button" onclick="clearCharts('binary-charts')">
+                Binary chart-ları sil
+            </button>
+        </div>
+
         <p class="muted">
             Real Binary LONG/SHORT signal Telegram-a gedəndə chart burada da görünəcək.
         </p>
@@ -374,7 +484,13 @@ public class AdminController : ControllerBase
     </div>
 
     <div class="chart-section">
-        <h2>Son Forex chart-lar</h2>
+        <div class="chart-section-header">
+            <h2>Son Forex chart-lar</h2>
+            <button class="danger-button small-button" onclick="clearCharts('forex-charts')">
+                Forex chart-ları sil
+            </button>
+        </div>
+
         <p class="muted">
             Real Forex LONG/SHORT signal Telegram-a gedəndə chart burada da görünəcək.
         </p>
@@ -431,6 +547,60 @@ async function saveSettings() {
     resultElement.innerText = "Yadda saxlanıldı.";
     resultElement.className = "success";
 }
+
+async function deleteChart(button) {
+    const folderName = button.dataset.folder;
+    const fileName = button.dataset.file;
+
+    if (!confirm("Bu chart silinsin?")) {
+        return;
+    }
+
+    const response = await fetch("/admin/charts/delete", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            folderName,
+            fileName
+        })
+    });
+
+    if (!response.ok) {
+        alert("Chart silinmedi.");
+        return;
+    }
+
+    location.reload();
+}
+
+async function clearCharts(folderName) {
+    const text = folderName === "binary-charts"
+        ? "Bütün Binary chart-lar silinsin?"
+        : "Bütün Forex chart-lar silinsin?";
+
+    if (!confirm(text)) {
+        return;
+    }
+
+    const response = await fetch("/admin/charts/clear", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            folderName
+        })
+    });
+
+    if (!response.ok) {
+        alert("Chart-lar silinmedi.");
+        return;
+    }
+
+    location.reload();
+}
 </script>
 </body>
 </html>
@@ -460,13 +630,27 @@ async function saveSettings() {
         {
             var title = WebUtility.HtmlEncode(chart.FileName);
             var url = WebUtility.HtmlEncode(chart.Url);
+            var folder = WebUtility.HtmlEncode(folderName);
+            var file = WebUtility.HtmlEncode(chart.FileName);
 
             sb.AppendLine($$"""
 <div class="chart-card">
     <div class="chart-title">{{title}}</div>
+
     <a href="{{url}}" target="_blank">
         <img src="{{url}}" alt="{{title}}" />
     </a>
+
+    <div class="chart-card-footer">
+        <span class="chart-date">{{chart.CreatedAtUtc:MM-dd HH:mm}} UTC</span>
+        <button
+            class="danger-button small-button"
+            data-folder="{{folder}}"
+            data-file="{{file}}"
+            onclick="deleteChart(this)">
+            Sil
+        </button>
+    </div>
 </div>
 """);
         }
@@ -475,6 +659,73 @@ async function saveSettings() {
     }
 
     private List<ChartFileInfo> GetLatestChartFiles(string folderName)
+    {
+        var chartDirectory = GetChartDirectory(folderName);
+
+        if (!Directory.Exists(chartDirectory))
+            return new List<ChartFileInfo>();
+
+        return Directory
+            .GetFiles(chartDirectory, "*.png")
+            .Select(path => new FileInfo(path))
+            .OrderByDescending(file => file.CreationTimeUtc)
+            .Take(6)
+            .Select(file => new ChartFileInfo
+            {
+                FileName = file.Name,
+                Url = "/" + folderName + "/" + Uri.EscapeDataString(file.Name),
+                CreatedAtUtc = file.CreationTimeUtc
+            })
+            .ToList();
+    }
+
+    private (bool Success, string Message) TryDeleteChart(
+        string folderName,
+        string fileName)
+    {
+        if (!IsAllowedChartFolder(folderName))
+            return (false, "Chart folder icaze verilmir.");
+
+        if (string.IsNullOrWhiteSpace(fileName))
+            return (false, "Fayl adi bosdur.");
+
+        var safeFileName = Path.GetFileName(fileName);
+
+        if (!safeFileName.EndsWith(".png", StringComparison.OrdinalIgnoreCase))
+            return (false, "Yalniz PNG chart siline biler.");
+
+        var chartDirectory = GetChartDirectory(folderName);
+
+        if (!Directory.Exists(chartDirectory))
+            return (false, "Chart folder tapilmadi.");
+
+        var fullPath = Path.GetFullPath(
+            Path.Combine(chartDirectory, safeFileName));
+
+        var allowedRoot = Path.GetFullPath(chartDirectory);
+
+        if (!fullPath.StartsWith(
+                allowedRoot + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return (false, "Fayl yolu icaze verilmir.");
+        }
+
+        if (!System.IO.File.Exists(fullPath))
+            return (false, "Chart fayli tapilmadi.");
+
+        try
+        {
+            System.IO.File.Delete(fullPath);
+            return (true, "Chart silindi.");
+        }
+        catch (Exception ex)
+        {
+            return (false, $"Chart silinmedi: {ex.Message}");
+        }
+    }
+
+    private string GetChartDirectory(string folderName)
     {
         var wwwroot = _environment.WebRootPath;
 
@@ -485,25 +736,15 @@ async function saveSettings() {
                 "wwwroot");
         }
 
-        var chartDirectory = Path.Combine(
+        return Path.Combine(
             wwwroot,
             folderName);
+    }
 
-        if (!Directory.Exists(chartDirectory))
-            return new List<ChartFileInfo>();
-
-        return Directory
-            .GetFiles(chartDirectory, "*.png")
-            .Select(path => new FileInfo(path))
-            .OrderByDescending(file => file.CreationTimeUtc)
-            .Take(12)
-            .Select(file => new ChartFileInfo
-            {
-                FileName = file.Name,
-                Url = "/" + folderName + "/" + Uri.EscapeDataString(file.Name),
-                CreatedAtUtc = file.CreationTimeUtc
-            })
-            .ToList();
+    private static bool IsAllowedChartFolder(string folderName)
+    {
+        return folderName == "binary-charts" ||
+               folderName == "forex-charts";
     }
 
     private static string BuildRadioButtons(
@@ -529,6 +770,16 @@ async function saveSettings() {
         return sb.ToString();
     }
 
+    public sealed class AdminChartDeleteRequest
+    {
+        public string FolderName { get; set; } = string.Empty;
+        public string FileName { get; set; } = string.Empty;
+    }
+
+    public sealed class AdminChartClearRequest
+    {
+        public string FolderName { get; set; } = string.Empty;
+    }
     private sealed class ChartFileInfo
     {
         public string FileName { get; set; } = string.Empty;

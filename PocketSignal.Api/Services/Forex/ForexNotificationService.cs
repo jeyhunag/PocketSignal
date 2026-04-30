@@ -1,4 +1,6 @@
-﻿using Microsoft.Extensions.Caching.Memory;
+﻿using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
+using PocketSignal.Api.Data;
 using PocketSignal.Api.Models.Forex;
 using PocketSignal.Api.Services.Telegram;
 
@@ -6,28 +8,34 @@ namespace PocketSignal.Api.Services.Forex;
 
 public class ForexNotificationService : IForexNotificationService
 {
-    private const int MinimumConfidence = 82;
-    private const int OppositeDirectionOverrideConfidence = 90;
+    private const int MinimumConfidence = 72;
+    private const int OppositeDirectionOverrideConfidence = 88;
 
-    private static readonly TimeSpan SameDirectionCooldown = TimeSpan.FromMinutes(60);
-    private static readonly TimeSpan SymbolCooldown = TimeSpan.FromMinutes(15);
-    private static readonly TimeSpan EntryZoneCooldown = TimeSpan.FromMinutes(120);
+    private static readonly TimeSpan SameDirectionCooldown = TimeSpan.FromMinutes(45);
+    private static readonly TimeSpan SymbolCooldown = TimeSpan.FromMinutes(12);
+    private static readonly TimeSpan EntryZoneCooldown = TimeSpan.FromMinutes(90);
+
+    // App restart olsa belə DB-yə baxıb təkrar signal göndərməsin
+    private static readonly TimeSpan DatabaseDuplicateCooldown = TimeSpan.FromMinutes(60);
 
     private readonly ITelegramService _telegramService;
     private readonly IForexChartImageService _chartImageService;
     private readonly IMemoryCache _cache;
     private readonly ILogger<ForexNotificationService> _logger;
+    private readonly PocketSignalDbContext _dbContext;
 
     public ForexNotificationService(
         ITelegramService telegramService,
         IForexChartImageService chartImageService,
         IMemoryCache cache,
-        ILogger<ForexNotificationService> logger)
+        ILogger<ForexNotificationService> logger,
+        PocketSignalDbContext dbContext)
     {
         _telegramService = telegramService;
         _chartImageService = chartImageService;
         _cache = cache;
         _logger = logger;
+        _dbContext = dbContext;
     }
 
     public async Task<(bool Sent, string Message)> NotifyIfValidSignalAsync(
@@ -55,6 +63,15 @@ public class ForexNotificationService : IForexNotificationService
         }
 
         var normalizedSymbol = Normalize(signal.Symbol);
+
+        var databaseDuplicate = await HasRecentDatabaseDuplicateAsync(
+            signal,
+            cancellationToken);
+
+        if (databaseDuplicate.IsDuplicate)
+        {
+            return (false, databaseDuplicate.Message);
+        }
 
         var sameDirectionKey = BuildSameDirectionKey(
             normalizedSymbol,
@@ -137,6 +154,63 @@ public class ForexNotificationService : IForexNotificationService
         return sentAsPhoto
             ? (true, "Forex signal Telegram-a chart sekli ile gonderildi.")
             : (true, "Forex signal Telegram-a text kimi gonderildi. Chart yaradilmadi ve ya gonderilmedi.");
+    }
+
+    private async Task<(bool IsDuplicate, string Message)> HasRecentDatabaseDuplicateAsync(
+        ForexTradeSignal signal,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var sinceUtc = DateTime.UtcNow.Subtract(DatabaseDuplicateCooldown);
+
+            var recentSignals = await _dbContext.ForexSignals
+                .AsNoTracking()
+                .Where(x =>
+                    x.CreatedAtUtc >= sinceUtc &&
+                    x.Symbol == signal.Symbol &&
+                    x.Direction == signal.Direction &&
+                    x.IsTradable)
+                .OrderByDescending(x => x.CreatedAtUtc)
+                .Take(20)
+                .ToListAsync(cancellationToken);
+
+            if (recentSignals.Count == 0)
+            {
+                return (false, string.Empty);
+            }
+
+            var currentZone = GetEntryZone(
+                Normalize(signal.Symbol),
+                signal.EntryPrice);
+
+            var sameZoneSignal = recentSignals.FirstOrDefault(x =>
+                GetEntryZone(
+                    Normalize(x.Symbol),
+                    x.EntryPrice) == currentZone);
+
+            if (sameZoneSignal != null)
+            {
+                return (
+                    true,
+                    $"DB duplicate filter aktivdir. Son {DatabaseDuplicateCooldown.TotalMinutes:0} deqiqede {signal.Symbol} {signal.Direction} eyni entry zonada Telegram-a gonderilib.");
+            }
+
+            var latestSameDirection = recentSignals.First();
+
+            return (
+                true,
+                $"DB duplicate filter aktivdir. Son {DatabaseDuplicateCooldown.TotalMinutes:0} deqiqede {signal.Symbol} {signal.Direction} signal artiq Telegram-a gonderilib. Son entry: {latestSameDirection.EntryPrice}");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Forex DB duplicate yoxlamasi ugursuz oldu. Signal prosesi davam edir. Symbol: {Symbol}",
+                signal.Symbol);
+
+            return (false, string.Empty);
+        }
     }
 
     private async Task<string?> TryCreateChartImageAsync(
@@ -267,9 +341,12 @@ public class ForexNotificationService : IForexNotificationService
         string normalizedSymbol,
         decimal entryPrice)
     {
-        var zoneSize = IsJpyPair(normalizedSymbol)
-            ? 0.05m
-            : 0.0005m;
+        var zoneSize = GetEntryZoneSize(
+            normalizedSymbol,
+            entryPrice);
+
+        if (zoneSize <= 0)
+            zoneSize = 0.0005m;
 
         var zoneNumber = Math.Round(
             entryPrice / zoneSize,
@@ -279,9 +356,29 @@ public class ForexNotificationService : IForexNotificationService
         return zoneNumber.ToString("0");
     }
 
-    private static bool IsJpyPair(string normalizedSymbol)
+    private static decimal GetEntryZoneSize(
+        string normalizedSymbol,
+        decimal entryPrice)
     {
-        return normalizedSymbol.Contains("JPY");
+        if (entryPrice <= 0)
+            return 0.0005m;
+
+        if (normalizedSymbol.Contains("JPY"))
+            return 0.20m;
+
+        if (normalizedSymbol.Contains("XAU"))
+            return 2.0m;
+
+        if (normalizedSymbol.Contains("BTC"))
+            return entryPrice * 0.002m;
+
+        if (normalizedSymbol.Contains("ETH"))
+            return entryPrice * 0.002m;
+
+        if (normalizedSymbol.Contains("USOIL"))
+            return 0.20m;
+
+        return 0.0015m;
     }
 
     private static string Normalize(string symbol)
