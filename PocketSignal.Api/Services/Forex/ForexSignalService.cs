@@ -3,6 +3,7 @@ using PocketSignal.Api.Models;
 using PocketSignal.Api.Models.Common;
 using PocketSignal.Api.Models.Forex;
 using PocketSignal.Api.Services.MarketData;
+using PocketSignal.Api.Services.Forex.Strategies;
 
 namespace PocketSignal.Api.Services.Forex;
 
@@ -13,14 +14,20 @@ public class ForexSignalService : IForexSignalService
     private const int MinimumScore = 82;
 
     private readonly List<IForexStrategy> _strategies = new()
-    {
-        new MultiTimeframeConfirmationStrategy(),
-        new TrendContinuationStrategy(),
-        new ReversalSweepStrategy(),
-        new SupportResistanceBounceStrategy(),
-        new BreakoutRetestStrategy(),
-        new VolatilityFilterStrategy()
-    };
+{
+    new MultiTimeframeConfirmationStrategy(),
+    new TrendContinuationStrategy(),
+    new ReversalSweepStrategy(),
+    new SupportResistanceBounceStrategy(),
+    new BreakoutRetestStrategy(),
+
+    new PatternBreakoutConfirmationStrategy(),
+    new FalseBreakoutTrapStrategy(),
+    new NarrowRangeInsideBarStrategy(),
+
+    new ForexSessionFilterStrategy(),
+    new VolatilityFilterStrategy(),
+};
 
     public ForexSignalService(IMarketDataService marketDataService)
     {
@@ -587,6 +594,119 @@ internal class BreakoutRetestStrategy : IForexStrategy
             score,
             MaxScore,
             score >= 11,
+            reasons);
+    }
+}
+
+
+internal class ForexSessionFilterStrategy : IForexStrategy
+{
+    public string Name => "ForexSessionFilterStrategy";
+
+    public int MaxScore => 10;
+
+    public bool IsDirectional => false;
+
+    public ForexStrategyResult Evaluate(
+        ForexMarketContext context,
+        string direction)
+    {
+        var utcNow = DateTime.UtcNow;
+        var hour = utcNow.Hour;
+        var day = utcNow.DayOfWeek;
+
+        var score = 0;
+        var reasons = new List<string>();
+
+        if (day == DayOfWeek.Saturday || day == DayOfWeek.Sunday)
+        {
+            reasons.Add("Session filter: hefte sonudur, forex trade ucun risklidir.");
+
+            return ForexStrategyResultFactory.Result(
+                Name,
+                "FILTER",
+                0,
+                MaxScore,
+                false,
+                reasons);
+        }
+
+        if (day == DayOfWeek.Monday && hour < 6)
+        {
+            reasons.Add("Session filter: bazar ertesi erken saatlar, spread/likvidlik riski ola biler.");
+
+            return ForexStrategyResultFactory.Result(
+                Name,
+                "FILTER",
+                2,
+                MaxScore,
+                false,
+                reasons);
+        }
+
+        if (day == DayOfWeek.Friday && hour >= 20)
+        {
+            reasons.Add("Session filter: cume gec saatlar, hefte sonu oncesi trade riski artir.");
+
+            return ForexStrategyResultFactory.Result(
+                Name,
+                "FILTER",
+                2,
+                MaxScore,
+                false,
+                reasons);
+        }
+
+        var isLondonSession = hour >= 7 && hour < 12;
+        var isLondonNewYorkOverlap = hour >= 12 && hour < 16;
+        var isNewYorkSession = hour >= 16 && hour < 20;
+        var isAsiaSession = hour >= 0 && hour < 7;
+        var isDeadZone = hour >= 20 && hour <= 23;
+
+        if (isLondonNewYorkOverlap)
+        {
+            score = 10;
+            reasons.Add("Session filter: London/New York overlap aktivdir, forex ucun en guclu likvidlik zonalarindan biridir.");
+        }
+        else if (isLondonSession)
+        {
+            score = 9;
+            reasons.Add("Session filter: London sessiyasi aktivdir, GBP/JPY ucun uygun vaxtdir.");
+        }
+        else if (isNewYorkSession)
+        {
+            score = 7;
+            reasons.Add("Session filter: New York sessiyasi aktivdir, trade ucun qebul edile biler vaxtdir.");
+        }
+        else if (isAsiaSession)
+        {
+            score = 5;
+            reasons.Add("Session filter: Asia sessiyasidir, GBP/JPY hereket ede biler amma fake move riski daha yuksekdir.");
+        }
+        else if (isDeadZone)
+        {
+            score = 3;
+            reasons.Add("Session filter: gec saatlar/dead zone, likvidlik zeif ola biler.");
+        }
+        else
+        {
+            score = 4;
+            reasons.Add("Session filter: orta keyfiyyetli saat araligidir.");
+        }
+
+        var isConfirmed = score >= 7;
+
+        if (!isConfirmed)
+        {
+            reasons.Add("Session filter: trade ucun ideal saat deyil, score azaldildi.");
+        }
+
+        return ForexStrategyResultFactory.Result(
+            Name,
+            "FILTER",
+            score,
+            MaxScore,
+            isConfirmed,
             reasons);
     }
 }

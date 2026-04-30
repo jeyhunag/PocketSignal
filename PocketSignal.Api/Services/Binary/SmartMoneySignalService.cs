@@ -35,13 +35,19 @@ public class SmartMoneySignalService : ISmartSignalService
             {
                 Symbol = symbol,
                 Direction = "WAIT",
+                ExpiryMinutes = 0,
+                ExpiryReason = "Expiry secilmedi: analiz ucun kifayet qeder candle data yoxdur.",
                 Confidence = 0,
                 Grade = "NO_TRADE",
                 Message = $"{symbol} WAIT",
+                EntryType = "NO_ENTRY",
+                ValidForSeconds = 0,
+                LastClose = 0,
                 Reasons = new List<string>
                 {
                     "Analiz ucun kifayet qeder candle data yoxdur."
-                }
+                },
+                CreatedAtUtc = DateTime.UtcNow
             };
         }
 
@@ -54,7 +60,6 @@ public class SmartMoneySignalService : ISmartSignalService
         var best = longScore.Score >= shortScore.Score ? longScore : shortScore;
         var lastClose = m1.Last().Close;
 
-        // Sərt No-Trade Filter: M15 və M5 ziddirsə, əməliyyat yoxdur
         if (m15Bias != "NEUTRAL" && m5Bias != "NEUTRAL" && m15Bias != m5Bias)
         {
             return new SmartTradeSignal
@@ -139,7 +144,7 @@ public class SmartMoneySignalService : ISmartSignalService
             };
         }
 
-        var expiryDecision = SelectExpiry(best);
+        var expiryDecision = SelectSmartExpiry(best, m15, m5, m1);
         var grade = GetGrade(best.Score);
 
         return new SmartTradeSignal
@@ -152,7 +157,7 @@ public class SmartMoneySignalService : ISmartSignalService
             Grade = grade,
             Message = $"{symbol} {best.Direction} {expiryDecision.Minutes} deqiqelik ac",
             EntryType = "NEXT_M1_CANDLE_OPEN_OR_NOW_IF_VALID",
-            ValidForSeconds = 25,
+            ValidForSeconds = expiryDecision.ValidForSeconds,
             LastClose = lastClose,
             InvalidIf = best.InvalidIf,
             Reasons = best.Reasons,
@@ -634,7 +639,7 @@ public class SmartMoneySignalService : ISmartSignalService
                 last.Close > previous.Open &&
                 last.Open <= previous.Close;
 
-            if (bullish && lowerRejection && strongClose || bullishEngulfing)
+            if ((bullish && lowerRejection && strongClose) || bullishEngulfing)
             {
                 return (true, "M1 bullish rejection/engulfing price action tesdiqi var.");
             }
@@ -650,7 +655,7 @@ public class SmartMoneySignalService : ISmartSignalService
                 last.Close < previous.Open &&
                 last.Open >= previous.Close;
 
-            if (bearish && upperRejection && strongClose || bearishEngulfing)
+            if ((bearish && upperRejection && strongClose) || bearishEngulfing)
             {
                 return (true, "M1 bearish rejection/engulfing price action tesdiqi var.");
             }
@@ -706,69 +711,186 @@ public class SmartMoneySignalService : ISmartSignalService
         return candles.Average(x => x.High - x.Low);
     }
 
-    private static (int Minutes, string Reason) SelectExpiry(DirectionScore score)
+    private static (int Minutes, int ValidForSeconds, string Reason) SelectSmartExpiry(
+        DirectionScore score,
+        List<Candle> m15,
+        List<Candle> m5,
+        List<Candle> m1)
     {
-        // Ən ideal binary entry: zona + M1 təsdiq + təmiz giriş.
-        // Belə setup-da 5 dəqiqə daha uyğundur, çünki entry dəqiqdir.
-        if (score.Score >= 82 &&
-            score.HasM5Zone &&
+        var minutes = 10;
+        var validForSeconds = 25;
+        var reasons = new List<string>();
+
+        var m1Recent = m1.TakeLast(20).ToList();
+        var m5Recent = m5.TakeLast(20).ToList();
+
+        var avgRangeM1 = AverageRange(m1Recent);
+        var avgRangeM5 = AverageRange(m5Recent);
+        var lastClose = m1.Last().Close;
+
+        var m1Move3 = Math.Abs(m1[^1].Close - m1[^4].Close);
+        var m1Move5 = Math.Abs(m1[^1].Close - m1[^6].Close);
+
+        var impulseRatio3 = avgRangeM1 > 0
+            ? m1Move3 / avgRangeM1
+            : 0;
+
+        var impulseRatio5 = avgRangeM1 > 0
+            ? m1Move5 / avgRangeM1
+            : 0;
+
+        var volatilityPercent = lastClose > 0
+            ? avgRangeM1 / lastClose * 100m
+            : 0;
+
+        var last3Directional = CountDirectionalCandles(
+            m1.TakeLast(3).ToList(),
+            score.Direction);
+
+        var last5Directional = CountDirectionalCandles(
+            m1.TakeLast(5).ToList(),
+            score.Direction);
+
+        if (score.IsM15Aligned && score.IsM5Aligned)
+        {
+            minutes += 3;
+            reasons.Add("M15 ve M5 eyni istiqametdedir, trade ucun daha genis vaxt verildi.");
+        }
+
+        if (score.HasM5Zone)
+        {
+            minutes -= 1;
+            reasons.Add("Qiymet M5 zona/retest daxilindedir, entry daha yaxindir.");
+        }
+
+        if (score.HasLiquiditySweep && score.HasChoch && score.HasPriceAction)
+        {
+            minutes -= 4;
+            validForSeconds = 20;
+            reasons.Add("Liquidity sweep + CHoCH + price action eyni anda var, qisa expiry daha uygundur.");
+        }
+        else if (score.HasChoch && score.HasPriceAction)
+        {
+            minutes -= 3;
+            validForSeconds = 22;
+            reasons.Add("M1 struktur ve price action tesdiqi var, qisa-orta expiry secildi.");
+        }
+        else if (score.HasChoch)
+        {
+            minutes -= 1;
+            reasons.Add("M1 CHoCH/BOS var, amma price action tam guclu deyil.");
+        }
+
+        if (impulseRatio3 >= 2.2m && last3Directional >= 2)
+        {
+            minutes -= 2;
+            validForSeconds = 18;
+            reasons.Add("M1 impulse gucludur, hereket artiq baslayib. Daha qisa expiry secildi.");
+        }
+        else if (impulseRatio5 <= 1.1m && score.IsM15Aligned && score.IsM5Aligned)
+        {
+            minutes += 3;
+            reasons.Add("M1 hereket hele yavasdir, HTF istiqametine vaxt vermek ucun expiry uzadildi.");
+        }
+
+        if (last5Directional >= 4 && impulseRatio5 >= 3m)
+        {
+            minutes += 2;
+            reasons.Add("Son M1 candle-lar istiqamete cox hereket edib, pullback/slowdown riski ucun expiry bir az uzadildi.");
+        }
+
+        if (volatilityPercent < 0.012m)
+        {
+            minutes += 4;
+            reasons.Add("Volatility zeifdir, qiymetin netice vermesi ucun daha uzun expiry secildi.");
+        }
+        else if (volatilityPercent >= 0.045m)
+        {
+            minutes -= 2;
+            validForSeconds = 18;
+            reasons.Add("Volatility aktivdir, qisa expiry daha effektiv ola biler.");
+        }
+
+        if (!score.IsEntryClean)
+        {
+            minutes += 3;
+            validForSeconds = 15;
+            reasons.Add("Entry bir az gecikmis ola biler, buna gore expiry uzadildi amma valid muddet azaldildi.");
+        }
+        else
+        {
+            reasons.Add("Entry temizdir, qiymet setup-dan cox uzaqlasmayib.");
+        }
+
+        if (score.Score >= 94 && score.IsM15Aligned && score.IsM5Aligned)
+        {
+            minutes += 2;
+            reasons.Add("A+ HTF confluence var, setup-a elave vaxt verildi.");
+        }
+
+        if (score.Score >= 90 &&
             score.HasLiquiditySweep &&
             score.HasChoch &&
             score.HasPriceAction &&
             score.IsEntryClean)
         {
-            return (
-                5,
-                "M5 zona, M1 liquidity sweep, CHoCH ve price action eyni anda tesdiq verdi. Qisa 5 deqiqelik expiry uygundur."
-            );
+            minutes = Math.Min(minutes, 5);
+            validForSeconds = 18;
+            reasons.Add("Cox temiz sniper entry oldugu ucun maksimum 5 deqiqelik expiry secildi.");
         }
 
-        // Çox güclü böyük timeframe setup.
-        // Entry M1-də tam ideal deyilsə, amma HTF çox güclüdürsə, daha uzun vaxt veririk.
-        if (score.Score >= 94 &&
-            score.IsM15Aligned &&
-            score.IsM5Aligned &&
-            score.HasM5Zone &&
-            score.IsVolatilityNormal)
+        if (avgRangeM5 > 0 && avgRangeM1 > 0)
         {
-            return (
-                20,
-                "Cox guclu M15/M5 confluence var. Daha boyuk hereket gozlenildiyi ucun 20 deqiqelik expiry secildi."
-            );
+            var m5ToM1RangeRatio = avgRangeM5 / avgRangeM1;
+
+            if (m5ToM1RangeRatio >= 4.5m && score.IsM15Aligned && score.IsM5Aligned)
+            {
+                minutes += 2;
+                reasons.Add("M5 range M1-den boyukdur, setup-un tam islemesi ucun expiry bir az uzadildi.");
+            }
         }
 
-        // Güclü HTF setup, amma çox uzun gözləməyə ehtiyac yoxdur.
-        if (score.Score >= 90 &&
-            score.IsM15Aligned &&
-            score.IsM5Aligned &&
-            score.HasM5Zone &&
-            score.IsVolatilityNormal)
-        {
-            return (
-                15,
-                "Setup daha cox M15/M5 strukturuna esaslanir. Qisa expiry yerine 15 deqiqelik expiry daha guvenlidir."
-            );
-        }
+        minutes = ClampToAllowedExpiry(minutes);
 
-        // M15 və M5 uyğun, M1 struktur təsdiqi də var.
-        if (score.Score >= 86 &&
-            score.IsM15Aligned &&
-            score.IsM5Aligned &&
-            score.HasM5Zone &&
-            score.HasChoch &&
-            score.IsVolatilityNormal)
-        {
-            return (
-                10,
-                "M15 ve M5 eyni istiqametdedir, M5 zona ve M1 struktur tesdiqi var. 10 deqiqelik expiry daha uygundur."
-            );
-        }
+        var reason =
+            $"Smart expiry: {minutes} deqiqe secildi. " +
+            string.Join(" ", reasons.Distinct());
 
-        // Default seçim: minimum score keçilib, amma yuxarıdakı xüsusi şərtlərə düşməyib.
         return (
-            5,
-            "Default secim: setup qisa muddetli binary entry ucun 5 deqiqelik expiry ile qiymetlendirildi."
-        );
+            Minutes: minutes,
+            ValidForSeconds: validForSeconds,
+            Reason: reason);
+    }
+
+    private static int CountDirectionalCandles(
+        List<Candle> candles,
+        string direction)
+    {
+        if (candles.Count == 0)
+            return 0;
+
+        if (direction == "LONG")
+            return candles.Count(x => x.Close > x.Open);
+
+        if (direction == "SHORT")
+            return candles.Count(x => x.Close < x.Open);
+
+        return 0;
+    }
+
+    private static int ClampToAllowedExpiry(int minutes)
+    {
+        var allowed = new[] { 3, 5, 7, 10, 12, 15, 20 };
+
+        if (minutes <= allowed.First())
+            return allowed.First();
+
+        if (minutes >= allowed.Last())
+            return allowed.Last();
+
+        return allowed
+            .OrderBy(x => Math.Abs(x - minutes))
+            .First();
     }
 
     private static string GetGrade(int score)

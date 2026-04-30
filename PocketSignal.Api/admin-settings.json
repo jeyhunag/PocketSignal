@@ -1,0 +1,28 @@
+{
+  "BinaryEnabled": true,
+  "BinaryActiveSymbol": "GBP/USD",
+  "BinarySymbols": [
+    "EUR/USD",
+    "GBP/USD",
+    "USD/JPY",
+    "EUR/GBP",
+    "GBP/JPY",
+    "AUD/USD",
+    "USD/CAD",
+    "EUR/JPY"
+  ],
+  "ForexEnabled": true,
+  "ForexActiveSymbol": "EUR/USD",
+  "ForexSymbols": [
+    "GBP/JPY",
+    "EUR/USD",
+    "USD/JPY",
+    "EUR/GBP",
+    "GBP/USD",
+    "BTC/USD",
+    "ETH/USD",
+    "XAU/USD",
+    "USOIL"
+  ],
+  "UpdatedAtUtc": "2026-04-30T20:15:05.62215Z"
+}

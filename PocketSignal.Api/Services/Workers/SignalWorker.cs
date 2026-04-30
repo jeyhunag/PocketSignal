@@ -1,4 +1,4 @@
-﻿using PocketSignal.Api.Models;
+﻿using PocketSignal.Api.Services.Admin;
 using PocketSignal.Api.Services.Binary;
 using PocketSignal.Api.Services.Stats;
 
@@ -8,28 +8,23 @@ public class SignalWorker : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly IAdminRuntimeSettingsService _adminSettingsService;
     private readonly ILogger<SignalWorker> _logger;
 
     public SignalWorker(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        IAdminRuntimeSettingsService adminSettingsService,
         ILogger<SignalWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _adminSettingsService = adminSettingsService;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var enabled = _configuration.GetValue<bool>("SignalWorker:Enabled");
-
-        if (!enabled)
-        {
-            _logger.LogInformation("SignalWorker deaktivdir.");
-            return;
-        }
-
         _logger.LogInformation("SignalWorker basladi.");
 
         while (!stoppingToken.IsCancellationRequested)
@@ -54,16 +49,19 @@ public class SignalWorker : BackgroundService
 
     private async Task CheckSignalsAsync(CancellationToken cancellationToken)
     {
-        var symbols = _configuration
-            .GetSection("SignalWorker:Symbols")
-            .GetChildren()
-            .Select(x => x.Value)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .ToList();
+        var settings = await _adminSettingsService.GetAsync(cancellationToken);
 
-        if (symbols.Count == 0)
+        if (!settings.BinaryEnabled)
         {
-            symbols.Add("EUR/USD");
+            _logger.LogInformation("SignalWorker admin panelden deaktiv edilib.");
+            return;
+        }
+
+        var symbol = settings.BinaryActiveSymbol;
+
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            symbol = "EUR/USD";
         }
 
         using var scope = _scopeFactory.CreateScope();
@@ -82,49 +80,44 @@ public class SignalWorker : BackgroundService
 
         await signalResultTracker.EvaluateDueSignalsAsync(cancellationToken);
 
-        foreach (var symbol in symbols)
+        var signal = await smartSignalService.AnalyzeAsync(
+            symbol,
+            cancellationToken);
+
+        var result = await notificationService.NotifyIfValidSignalAsync(
+            signal,
+            cancellationToken);
+
+        if (result.Sent)
         {
-            var signal = await smartSignalService.AnalyzeAsync(
-                symbol!,
-                cancellationToken);
+            var registeredTrade = signalResultTracker.RegisterSignal(signal);
 
-            var result = await notificationService.NotifyIfValidSignalAsync(
-                signal,
-                cancellationToken);
-
-            if (result.Sent)
+            if (registeredTrade != null)
             {
-                var registeredTrade = signalResultTracker.RegisterSignal(signal);
-
-                if (registeredTrade != null)
-                {
-                    _logger.LogInformation(
-                        "Signal registered. Id: {Id} | {Symbol} {Direction} {Expiry}m | Entry: {EntryPrice} | Due: {DueAtUtc}",
-                        registeredTrade.Id,
-                        registeredTrade.Symbol,
-                        registeredTrade.Direction,
-                        registeredTrade.ExpiryMinutes,
-                        registeredTrade.EntryPrice,
-                        registeredTrade.DueAtUtc);
-                }
+                _logger.LogInformation(
+                    "Signal registered. Id: {Id} | {Symbol} {Direction} {Expiry}m | Entry: {EntryPrice} | Due: {DueAtUtc}",
+                    registeredTrade.Id,
+                    registeredTrade.Symbol,
+                    registeredTrade.Direction,
+                    registeredTrade.ExpiryMinutes,
+                    registeredTrade.EntryPrice,
+                    registeredTrade.DueAtUtc);
             }
-
-            await signalResultTracker.EvaluateDueSignalsAsync(cancellationToken);
-
-            dailyStatsService.RecordCheck(
-                signal,
-                result.Sent,
-                result.Message);
-
-            _logger.LogInformation(
-                "Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
-                signal.Symbol,
-                signal.Direction,
-                signal.Confidence,
-                result.Sent,
-                result.Message);
-
-            await Task.Delay(500, cancellationToken);
         }
+
+        await signalResultTracker.EvaluateDueSignalsAsync(cancellationToken);
+
+        dailyStatsService.RecordCheck(
+            signal,
+            result.Sent,
+            result.Message);
+
+        _logger.LogInformation(
+            "Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
+            signal.Symbol,
+            signal.Direction,
+            signal.Confidence,
+            result.Sent,
+            result.Message);
     }
 }

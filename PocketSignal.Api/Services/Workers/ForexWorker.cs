@@ -1,4 +1,5 @@
-﻿using PocketSignal.Api.Services.Forex;
+﻿using PocketSignal.Api.Services.Admin;
+using PocketSignal.Api.Services.Forex;
 
 namespace PocketSignal.Api.Services.Workers;
 
@@ -6,28 +7,23 @@ public class ForexWorker : BackgroundService
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly IConfiguration _configuration;
+    private readonly IAdminRuntimeSettingsService _adminSettingsService;
     private readonly ILogger<ForexWorker> _logger;
 
     public ForexWorker(
         IServiceScopeFactory scopeFactory,
         IConfiguration configuration,
+        IAdminRuntimeSettingsService adminSettingsService,
         ILogger<ForexWorker> logger)
     {
         _scopeFactory = scopeFactory;
         _configuration = configuration;
+        _adminSettingsService = adminSettingsService;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var enabled = _configuration.GetValue<bool>("ForexWorker:Enabled");
-
-        if (!enabled)
-        {
-            _logger.LogInformation("ForexWorker deaktivdir.");
-            return;
-        }
-
         _logger.LogInformation("ForexWorker basladi.");
 
         while (!stoppingToken.IsCancellationRequested)
@@ -52,16 +48,19 @@ public class ForexWorker : BackgroundService
 
     private async Task CheckForexSignalsAsync(CancellationToken cancellationToken)
     {
-        var symbols = _configuration
-            .GetSection("ForexWorker:Symbols")
-            .GetChildren()
-            .Select(x => x.Value)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .ToList();
+        var settings = await _adminSettingsService.GetAsync(cancellationToken);
 
-        if (symbols.Count == 0)
+        if (!settings.ForexEnabled)
         {
-            symbols.Add("GBP/JPY");
+            _logger.LogInformation("ForexWorker admin panelden deaktiv edilib.");
+            return;
+        }
+
+        var symbol = settings.ForexActiveSymbol;
+
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            symbol = "GBP/JPY";
         }
 
         using var scope = _scopeFactory.CreateScope();
@@ -80,40 +79,35 @@ public class ForexWorker : BackgroundService
 
         await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
 
-        foreach (var symbol in symbols)
-        {
-            var signal = await forexSignalService.AnalyzeAsync(
-                symbol!,
-                cancellationToken);
+        var signal = await forexSignalService.AnalyzeAsync(
+            symbol,
+            cancellationToken);
 
-            var result = await forexNotificationService.NotifyIfValidSignalAsync(
-                signal,
-                cancellationToken);
+        var result = await forexNotificationService.NotifyIfValidSignalAsync(
+            signal,
+            cancellationToken);
 
-            var savedSignalId = await forexSignalDatabaseService.SaveSignalAsync(
-                signal,
-                result.Sent,
-                result.Message,
-                cancellationToken);
+        var savedSignalId = await forexSignalDatabaseService.SaveSignalAsync(
+            signal,
+            result.Sent,
+            result.Message,
+            cancellationToken);
 
-            _logger.LogInformation(
-                "FOREX signal DB saved. Id: {Id} | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence}",
-                savedSignalId,
-                signal.Symbol,
-                signal.Direction,
-                signal.Confidence);
+        _logger.LogInformation(
+            "FOREX signal DB saved. Id: {Id} | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence}",
+            savedSignalId,
+            signal.Symbol,
+            signal.Direction,
+            signal.Confidence);
 
-            await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
+        await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
 
-            _logger.LogInformation(
-                "FOREX | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
-                signal.Symbol,
-                signal.Direction,
-                signal.Confidence,
-                result.Sent,
-                result.Message);
-
-            await Task.Delay(500, cancellationToken);
-        }
+        _logger.LogInformation(
+            "FOREX | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
+            signal.Symbol,
+            signal.Direction,
+            signal.Confidence,
+            result.Sent,
+            result.Message);
     }
 }

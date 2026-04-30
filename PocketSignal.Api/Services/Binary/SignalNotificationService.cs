@@ -7,15 +7,23 @@ namespace PocketSignal.Api.Services.Binary;
 
 public class SignalNotificationService : ISignalNotificationService
 {
+    private const int MinimumConfidence = 82;
+
     private readonly ITelegramService _telegramService;
+    private readonly IBinaryChartImageService _chartImageService;
     private readonly IMemoryCache _cache;
+    private readonly ILogger<SignalNotificationService> _logger;
 
     public SignalNotificationService(
         ITelegramService telegramService,
-        IMemoryCache cache)
+        IBinaryChartImageService chartImageService,
+        IMemoryCache cache,
+        ILogger<SignalNotificationService> logger)
     {
         _telegramService = telegramService;
+        _chartImageService = chartImageService;
         _cache = cache;
+        _logger = logger;
     }
 
     public async Task<(bool Sent, string Message)> NotifyIfValidSignalAsync(
@@ -27,13 +35,28 @@ public class SignalNotificationService : ISignalNotificationService
             return (false, "WAIT signal Telegram-a gonderilmedi.");
         }
 
-        if (signal.Confidence < 82)
+        if (signal.Direction != "LONG" && signal.Direction != "SHORT")
         {
-            return (false, "Confidence 82-den asagidir, Telegram-a gonderilmedi.");
+            return (false, "Binary direction LONG/SHORT deyil, Telegram-a gonderilmedi.");
+        }
+
+        if (signal.Confidence < MinimumConfidence)
+        {
+            return (false, $"Confidence {MinimumConfidence}-den asagidir, Telegram-a gonderilmedi.");
+        }
+
+        if (signal.ExpiryMinutes <= 0)
+        {
+            return (false, "ExpiryMinutes duzgun deyil, Telegram-a gonderilmedi.");
+        }
+
+        if (signal.LastClose <= 0)
+        {
+            return (false, "Entry qiymeti duzgun deyil, Telegram-a gonderilmedi.");
         }
 
         var cacheKey =
-            $"telegram-signal:{signal.Symbol}:{signal.Direction}:{signal.ExpiryMinutes}";
+            $"telegram-signal:{Normalize(signal.Symbol)}:{signal.Direction}:{signal.ExpiryMinutes}";
 
         if (_cache.TryGetValue(cacheKey, out _))
         {
@@ -42,9 +65,39 @@ public class SignalNotificationService : ISignalNotificationService
 
         var message = SignalMessageFormatter.Format(signal);
 
-        await _telegramService.SendMessageAsync(
-            message,
+        var chartImagePath = await TryCreateChartImageAsync(
+            signal,
             cancellationToken);
+
+        var sentAsPhoto = false;
+
+        if (!string.IsNullOrWhiteSpace(chartImagePath) &&
+            File.Exists(chartImagePath))
+        {
+            try
+            {
+                await _telegramService.SendPhotoAsync(
+                    chartImagePath,
+                    message,
+                    cancellationToken);
+
+                sentAsPhoto = true;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Binary signal chart Telegram-a photo kimi gonderilmedi. Text fallback istifade olunacaq. Symbol: {Symbol}",
+                    signal.Symbol);
+            }
+        }
+
+        if (!sentAsPhoto)
+        {
+            await _telegramService.SendMessageAsync(
+                message,
+                cancellationToken);
+        }
 
         _cache.Set(
             cacheKey,
@@ -54,6 +107,38 @@ public class SignalNotificationService : ISignalNotificationService
                 AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
             });
 
-        return (true, "Signal Telegram-a gonderildi.");
+        return sentAsPhoto
+            ? (true, "Binary signal Telegram-a chart sekli ile gonderildi.")
+            : (true, "Binary signal Telegram-a text kimi gonderildi. Chart yaradilmadi ve ya gonderilmedi.");
+    }
+
+    private async Task<string?> TryCreateChartImageAsync(
+        SmartTradeSignal signal,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await _chartImageService.GenerateSignalChartAsync(
+                signal,
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Binary chart yaradilmadi. Signal yenə text kimi gonderilecek. Symbol: {Symbol}",
+                signal.Symbol);
+
+            return null;
+        }
+    }
+
+    private static string Normalize(string symbol)
+    {
+        return symbol
+            .Replace("/", "_")
+            .Replace("-", "_")
+            .Replace(" ", "")
+            .ToUpperInvariant();
     }
 }

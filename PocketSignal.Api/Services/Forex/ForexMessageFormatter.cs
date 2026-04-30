@@ -140,7 +140,12 @@ public static class ForexMessageFormatter
             .Replace("ReversalSweep", "Reversal Sweep")
             .Replace("SupportResistanceBounce", "S/R Bounce")
             .Replace("BreakoutRetest", "Breakout Retest")
-            .Replace("VolatilityFilter", "Volatility Filter");
+            .Replace("PatternBreakoutConfirmation", "Pattern Breakout")
+            .Replace("FalseBreakoutTrap", "False Breakout Trap")
+            .Replace("NarrowRangeInsideBar", "NR / Inside Bar")
+            .Replace("ForexSessionFilter", "Session Filter")
+            .Replace("VolatilityFilter", "Volatility Filter")
+            .Replace("RiskRewardValidation", "Risk/Reward Validation");
     }
 
     private static string FormatPrice(decimal value)
