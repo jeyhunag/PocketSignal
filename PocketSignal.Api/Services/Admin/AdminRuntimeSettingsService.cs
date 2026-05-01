@@ -5,22 +5,21 @@ namespace PocketSignal.Api.Services.Admin;
 
 public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
 {
-    private readonly IWebHostEnvironment _environment;
-    private readonly ILogger<AdminRuntimeSettingsService> _logger;
+    private readonly string _filePath;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true,
-        PropertyNameCaseInsensitive = true
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public AdminRuntimeSettingsService(
-        IWebHostEnvironment environment,
-        ILogger<AdminRuntimeSettingsService> logger)
+    public AdminRuntimeSettingsService(IWebHostEnvironment environment)
     {
-        _environment = environment;
-        _logger = logger;
+        _filePath = Path.Combine(
+            environment.ContentRootPath,
+            "admin-settings.json");
     }
 
     public async Task<AdminRuntimeSettings> GetAsync(
@@ -30,42 +29,26 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
 
         try
         {
-            var path = GetSettingsPath();
-
-            if (!File.Exists(path))
+            if (!File.Exists(_filePath))
             {
-                var defaultSettings = CreateDefaultSettings();
-                await SaveInternalAsync(defaultSettings, cancellationToken);
-                return defaultSettings;
+                var fresh = CreateDefaultSettings();
+                await SaveInternalAsync(fresh, cancellationToken);
+                return fresh;
             }
 
-            var json = await File.ReadAllTextAsync(path, cancellationToken);
-
-            if (string.IsNullOrWhiteSpace(json))
-            {
-                var defaultSettings = CreateDefaultSettings();
-                await SaveInternalAsync(defaultSettings, cancellationToken);
-                return defaultSettings;
-            }
+            var json = await File.ReadAllTextAsync(
+                _filePath,
+                cancellationToken);
 
             var settings = JsonSerializer.Deserialize<AdminRuntimeSettings>(
                 json,
                 JsonOptions);
 
-            if (settings == null)
-            {
-                var defaultSettings = CreateDefaultSettings();
-                await SaveInternalAsync(defaultSettings, cancellationToken);
-                return defaultSettings;
-            }
+            settings ??= CreateDefaultSettings();
 
-            NormalizeSettings(settings);
+            Normalize(settings);
+
             return settings;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Admin runtime settings oxunarken xeta bas verdi.");
-            return CreateDefaultSettings();
         }
         finally
         {
@@ -81,52 +64,52 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
 
         try
         {
-            var settings = CreateDefaultSettings();
+            AdminRuntimeSettings settings;
 
-            var path = GetSettingsPath();
-
-            if (File.Exists(path))
+            if (File.Exists(_filePath))
             {
-                var json = await File.ReadAllTextAsync(path, cancellationToken);
+                var json = await File.ReadAllTextAsync(
+                    _filePath,
+                    cancellationToken);
 
-                if (!string.IsNullOrWhiteSpace(json))
-                {
-                    var existing = JsonSerializer.Deserialize<AdminRuntimeSettings>(
-                        json,
-                        JsonOptions);
-
-                    if (existing != null)
-                    {
-                        settings = existing;
-                    }
-                }
+                settings = JsonSerializer.Deserialize<AdminRuntimeSettings>(
+                    json,
+                    JsonOptions) ?? CreateDefaultSettings();
+            }
+            else
+            {
+                settings = CreateDefaultSettings();
             }
 
-            NormalizeSettings(settings);
+            Normalize(settings);
 
             settings.BinaryEnabled = request.BinaryEnabled;
             settings.ForexEnabled = request.ForexEnabled;
 
             if (settings.BinarySymbols.Contains(request.BinaryActiveSymbol))
-            {
                 settings.BinaryActiveSymbol = request.BinaryActiveSymbol;
-            }
 
             if (settings.ForexSymbols.Contains(request.ForexActiveSymbol))
-            {
                 settings.ForexActiveSymbol = request.ForexActiveSymbol;
-            }
 
+            settings.Mt5AutoTradeEnabled = request.Mt5AutoTradeEnabled;
+            settings.Mt5LotSize = ClampLotSize(request.Mt5LotSize);
+            settings.Mt5TakeProfitMode = NormalizeTakeProfitMode(request.Mt5TakeProfitMode);
+            settings.Mt5MinimumConfidence = Clamp(request.Mt5MinimumConfidence, 50, 99);
+            settings.Mt5MinimumGrade = NormalizeGrade(request.Mt5MinimumGrade);
+            settings.Mt5CooldownMinutes = Clamp(request.Mt5CooldownMinutes, 0, 1440);
+            settings.Mt5MaxPendingMinutes = Clamp(
+                request.Mt5MaxPendingMinutes <= 0 ? 10 : request.Mt5MaxPendingMinutes,
+                1,
+                1440);
+            settings.Mt5MaxTradesPerDay = Clamp(request.Mt5MaxTradesPerDay, 1, 100);
+            settings.Mt5DemoOnly = request.Mt5DemoOnly;
+            settings.Mt5OnePositionPerSymbol = request.Mt5OnePositionPerSymbol;
             settings.UpdatedAtUtc = DateTime.UtcNow;
 
             await SaveInternalAsync(settings, cancellationToken);
 
             return settings;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Admin runtime settings update olunarken xeta bas verdi.");
-            throw;
         }
         finally
         {
@@ -138,35 +121,33 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
         AdminRuntimeSettings settings,
         CancellationToken cancellationToken)
     {
-        NormalizeSettings(settings);
+        Normalize(settings);
 
         var json = JsonSerializer.Serialize(
             settings,
             JsonOptions);
 
         await File.WriteAllTextAsync(
-            GetSettingsPath(),
+            _filePath,
             json,
             cancellationToken);
     }
 
-    private string GetSettingsPath()
-    {
-        return Path.Combine(
-            _environment.ContentRootPath,
-            "admin-settings.json");
-    }
-
     private static AdminRuntimeSettings CreateDefaultSettings()
     {
-        var settings = new AdminRuntimeSettings();
-        NormalizeSettings(settings);
+        var settings = new AdminRuntimeSettings
+        {
+            UpdatedAtUtc = DateTime.UtcNow
+        };
+
+        Normalize(settings);
+
         return settings;
     }
 
-    private static void NormalizeSettings(AdminRuntimeSettings settings)
+    private static void Normalize(AdminRuntimeSettings settings)
     {
-        if (settings.BinarySymbols == null || settings.BinarySymbols.Count == 0)
+        if (settings.BinarySymbols.Count == 0)
         {
             settings.BinarySymbols = new List<string>
             {
@@ -181,7 +162,7 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             };
         }
 
-        if (settings.ForexSymbols == null || settings.ForexSymbols.Count == 0)
+        if (settings.ForexSymbols.Count == 0)
         {
             settings.ForexSymbols = new List<string>
             {
@@ -197,21 +178,67 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             };
         }
 
-        if (string.IsNullOrWhiteSpace(settings.BinaryActiveSymbol) ||
-            !settings.BinarySymbols.Contains(settings.BinaryActiveSymbol))
-        {
+        if (!settings.BinarySymbols.Contains(settings.BinaryActiveSymbol))
             settings.BinaryActiveSymbol = settings.BinarySymbols.First();
-        }
 
-        if (string.IsNullOrWhiteSpace(settings.ForexActiveSymbol) ||
-            !settings.ForexSymbols.Contains(settings.ForexActiveSymbol))
-        {
+        if (!settings.ForexSymbols.Contains(settings.ForexActiveSymbol))
             settings.ForexActiveSymbol = settings.ForexSymbols.First();
-        }
 
-        if (settings.UpdatedAtUtc == default)
+        settings.Mt5LotSize = ClampLotSize(settings.Mt5LotSize);
+        settings.Mt5TakeProfitMode = NormalizeTakeProfitMode(settings.Mt5TakeProfitMode);
+        settings.Mt5MinimumConfidence = Clamp(settings.Mt5MinimumConfidence, 50, 99);
+        settings.Mt5MinimumGrade = NormalizeGrade(settings.Mt5MinimumGrade);
+        settings.Mt5CooldownMinutes = Clamp(settings.Mt5CooldownMinutes, 0, 1440);
+
+        if (settings.Mt5MaxPendingMinutes <= 0)
+            settings.Mt5MaxPendingMinutes = 10;
+        else
+            settings.Mt5MaxPendingMinutes = Clamp(settings.Mt5MaxPendingMinutes, 1, 1440);
+
+        settings.Mt5MaxTradesPerDay = Clamp(settings.Mt5MaxTradesPerDay, 1, 100);
+    }
+
+    private static double ClampLotSize(double value)
+    {
+        if (value < 0.01)
+            return 0.01;
+
+        if (value > 10)
+            return 10;
+
+        return Math.Round(value, 2);
+    }
+
+    private static string NormalizeTakeProfitMode(string value)
+    {
+        value = value.Trim().ToUpperInvariant();
+
+        return value == "TP2"
+            ? "TP2"
+            : "TP1";
+    }
+
+    private static string NormalizeGrade(string value)
+    {
+        value = value.Trim().ToUpperInvariant();
+
+        return value switch
         {
-            settings.UpdatedAtUtc = DateTime.UtcNow;
-        }
+            "A+" => "A+",
+            "A" => "A",
+            "B" => "B",
+            _ => "B"
+        };
+    }
+
+    private static int Clamp(int value, int min, int max)
+    {
+        if (value < min)
+            return min;
+
+        if (value > max)
+            return max;
+
+        return value;
     }
 }

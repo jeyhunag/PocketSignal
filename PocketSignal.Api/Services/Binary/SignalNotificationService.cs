@@ -55,12 +55,16 @@ public class SignalNotificationService : ISignalNotificationService
             return (false, "Entry qiymeti duzgun deyil, Telegram-a gonderilmedi.");
         }
 
+        // VACIB:
+        // Burada expiry-ni cache key-den cixardiq.
+        // Evvel: USD/CAD LONG 12m ve USD/CAD LONG 10m ayri sayilirdi.
+        // Indi: USD/CAD LONG ucun expiry bitene qeder tekrar signal getmeyecek.
         var cacheKey =
-            $"telegram-signal:{Normalize(signal.Symbol)}:{signal.Direction}:{signal.ExpiryMinutes}";
+            $"binary-telegram-cooldown:{Normalize(signal.Symbol)}:{signal.Direction}";
 
         if (_cache.TryGetValue(cacheKey, out _))
         {
-            return (false, "Bu signal artiq gonderilib. Cooldown aktivdir.");
+            return (false, $"Binary cooldown aktivdir. {signal.Symbol} {signal.Direction} ucun expiry bitmeyib.");
         }
 
         var message = SignalMessageFormatter.Format(signal);
@@ -99,17 +103,19 @@ public class SignalNotificationService : ISignalNotificationService
                 cancellationToken);
         }
 
+        var cooldownMinutes = Math.Max(1, signal.ExpiryMinutes);
+
         _cache.Set(
             cacheKey,
             true,
             new MemoryCacheEntryOptions
             {
-                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(5)
+                AbsoluteExpirationRelativeToNow = TimeSpan.FromMinutes(cooldownMinutes)
             });
 
         return sentAsPhoto
-            ? (true, "Binary signal Telegram-a chart sekli ile gonderildi.")
-            : (true, "Binary signal Telegram-a text kimi gonderildi. Chart yaradilmadi ve ya gonderilmedi.");
+            ? (true, $"Binary signal Telegram-a chart sekli ile gonderildi. Cooldown: {cooldownMinutes} deqiqe.")
+            : (true, $"Binary signal Telegram-a text kimi gonderildi. Cooldown: {cooldownMinutes} deqiqe.");
     }
 
     private async Task<string?> TryCreateChartImageAsync(

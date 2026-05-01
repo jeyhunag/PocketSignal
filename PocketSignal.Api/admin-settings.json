@@ -1,7 +1,7 @@
 {
-  "BinaryEnabled": true,
-  "BinaryActiveSymbol": "GBP/USD",
-  "BinarySymbols": [
+  "binaryEnabled": true,
+  "binaryActiveSymbol": "USD/CAD",
+  "binarySymbols": [
     "EUR/USD",
     "GBP/USD",
     "USD/JPY",
@@ -11,9 +11,9 @@
     "USD/CAD",
     "EUR/JPY"
   ],
-  "ForexEnabled": true,
-  "ForexActiveSymbol": "GBP/JPY",
-  "ForexSymbols": [
+  "forexEnabled": true,
+  "forexActiveSymbol": "ETH/USD",
+  "forexSymbols": [
     "GBP/JPY",
     "EUR/USD",
     "USD/JPY",
@@ -24,5 +24,15 @@
     "XAU/USD",
     "USOIL"
   ],
-  "UpdatedAtUtc": "2026-04-30T22:49:20.6232559Z"
+  "mt5AutoTradeEnabled": true,
+  "mt5LotSize": 0.02,
+  "mt5TakeProfitMode": "TP1",
+  "mt5MinimumConfidence": 82,
+  "mt5MinimumGrade": "B",
+  "mt5CooldownMinutes": 60,
+  "mt5MaxPendingMinutes": 10,
+  "mt5MaxTradesPerDay": 5,
+  "mt5DemoOnly": true,
+  "mt5OnePositionPerSymbol": true,
+  "updatedAtUtc": "2026-05-01T16:29:14.7362082Z"
 }

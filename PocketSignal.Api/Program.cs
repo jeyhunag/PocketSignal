@@ -9,8 +9,13 @@ using PocketSignal.Api.Services.MarketData;
 using PocketSignal.Api.Services.Stats;
 using PocketSignal.Api.Services.Telegram;
 using PocketSignal.Api.Services.Workers;
+using PocketSignal.Api.Services.Mt5;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.WebHost.UseUrls(
+    "http://127.0.0.1:5080",
+    "https://127.0.0.1:7079");
 
 var wwwrootPath = Path.Combine(
     builder.Environment.ContentRootPath,
@@ -55,6 +60,7 @@ builder.Services.AddScoped<IForexNotificationService, ForexNotificationService>(
 builder.Services.AddScoped<IForexSignalDatabaseService, ForexSignalDatabaseService>();
 builder.Services.AddScoped<IForexChartImageService, ForexChartImageService>();
 builder.Services.AddSingleton<IForexTradeResultTracker, ForexTradeResultTracker>();
+builder.Services.AddSingleton<IMt5AutoTradeQueueService, Mt5AutoTradeQueueService>();
 
 // Telegram
 builder.Services.AddHttpClient<ITelegramService, TelegramService>();
@@ -79,7 +85,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseHttpsRedirection();
+//app.UseHttpsRedirection();
 
 app.UseStaticFiles();
 

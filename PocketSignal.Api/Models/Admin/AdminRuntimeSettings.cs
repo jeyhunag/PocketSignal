@@ -3,7 +3,9 @@
 public class AdminRuntimeSettings
 {
     public bool BinaryEnabled { get; set; } = true;
+
     public string BinaryActiveSymbol { get; set; } = "EUR/USD";
+
     public List<string> BinarySymbols { get; set; } = new()
     {
         "EUR/USD",
@@ -17,7 +19,9 @@ public class AdminRuntimeSettings
     };
 
     public bool ForexEnabled { get; set; } = true;
+
     public string ForexActiveSymbol { get; set; } = "GBP/JPY";
+
     public List<string> ForexSymbols { get; set; } = new()
     {
         "GBP/JPY",
@@ -30,6 +34,26 @@ public class AdminRuntimeSettings
         "XAU/USD",
         "USOIL"
     };
+
+    public bool Mt5AutoTradeEnabled { get; set; } = false;
+
+    public double Mt5LotSize { get; set; } = 0.02;
+
+    public string Mt5TakeProfitMode { get; set; } = "TP1";
+
+    public int Mt5MinimumConfidence { get; set; } = 82;
+
+    public string Mt5MinimumGrade { get; set; } = "B";
+
+    public int Mt5CooldownMinutes { get; set; } = 60;
+
+    public int Mt5MaxPendingMinutes { get; set; } = 10;
+
+    public int Mt5MaxTradesPerDay { get; set; } = 5;
+
+    public bool Mt5DemoOnly { get; set; } = true;
+
+    public bool Mt5OnePositionPerSymbol { get; set; } = true;
 
     public DateTime UpdatedAtUtc { get; set; } = DateTime.UtcNow;
 }

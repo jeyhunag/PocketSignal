@@ -2,6 +2,7 @@
 using Microsoft.Extensions.Caching.Memory;
 using PocketSignal.Api.Data;
 using PocketSignal.Api.Models.Forex;
+using PocketSignal.Api.Services.Mt5;
 using PocketSignal.Api.Services.Telegram;
 
 namespace PocketSignal.Api.Services.Forex;
@@ -14,8 +15,6 @@ public class ForexNotificationService : IForexNotificationService
     private static readonly TimeSpan SameDirectionCooldown = TimeSpan.FromMinutes(45);
     private static readonly TimeSpan SymbolCooldown = TimeSpan.FromMinutes(12);
     private static readonly TimeSpan EntryZoneCooldown = TimeSpan.FromMinutes(90);
-
-    // App restart olsa belə DB-yə baxıb təkrar signal göndərməsin
     private static readonly TimeSpan DatabaseDuplicateCooldown = TimeSpan.FromMinutes(60);
 
     private readonly ITelegramService _telegramService;
@@ -23,19 +22,22 @@ public class ForexNotificationService : IForexNotificationService
     private readonly IMemoryCache _cache;
     private readonly ILogger<ForexNotificationService> _logger;
     private readonly PocketSignalDbContext _dbContext;
+    private readonly IMt5AutoTradeQueueService _mt5QueueService;
 
     public ForexNotificationService(
         ITelegramService telegramService,
         IForexChartImageService chartImageService,
         IMemoryCache cache,
         ILogger<ForexNotificationService> logger,
-        PocketSignalDbContext dbContext)
+        PocketSignalDbContext dbContext,
+        IMt5AutoTradeQueueService mt5QueueService)
     {
         _telegramService = telegramService;
         _chartImageService = chartImageService;
         _cache = cache;
         _logger = logger;
         _dbContext = dbContext;
+        _mt5QueueService = mt5QueueService;
     }
 
     public async Task<(bool Sent, string Message)> NotifyIfValidSignalAsync(
@@ -151,9 +153,55 @@ public class ForexNotificationService : IForexNotificationService
             normalizedSymbol,
             signal);
 
-        return sentAsPhoto
-            ? (true, "Forex signal Telegram-a chart sekli ile gonderildi.")
-            : (true, "Forex signal Telegram-a text kimi gonderildi. Chart yaradilmadi ve ya gonderilmedi.");
+        var mt5Result = await TryAddToMt5QueueAsync(
+            signal,
+            cancellationToken);
+
+        var telegramMessage = sentAsPhoto
+            ? "Forex signal Telegram-a chart sekli ile gonderildi."
+            : "Forex signal Telegram-a text kimi gonderildi. Chart yaradilmadi ve ya gonderilmedi.";
+
+        return (
+            true,
+            $"{telegramMessage} MT5: {mt5Result}");
+    }
+
+    private async Task<string> TryAddToMt5QueueAsync(
+        ForexTradeSignal signal,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _mt5QueueService.EnqueueAsync(
+                signal,
+                cancellationToken);
+
+            if (result.Added)
+            {
+                _logger.LogInformation(
+                    "Forex signal MT5 queue-ya elave edildi. OrderId: {OrderId} | {Symbol} {Direction}",
+                    result.Order?.Id,
+                    signal.Symbol,
+                    signal.Direction);
+            }
+            else
+            {
+                _logger.LogInformation(
+                    "Forex signal MT5 queue-ya elave edilmedi. {Message}",
+                    result.Message);
+            }
+
+            return result.Message;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Forex signal MT5 queue-ya elave edilmedi. Symbol: {Symbol}",
+                signal.Symbol);
+
+            return $"MT5 queue xetasi: {ex.Message}";
+        }
     }
 
     private async Task<(bool IsDuplicate, string Message)> HasRecentDatabaseDuplicateAsync(

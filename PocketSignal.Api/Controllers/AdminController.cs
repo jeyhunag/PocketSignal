@@ -1,4 +1,5 @@
-﻿using System.Net;
+﻿using System.Globalization;
+using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
 using PocketSignal.Api.Models.Admin;
@@ -159,6 +160,19 @@ public class AdminController : ControllerBase
         var binaryChecked = settings.BinaryEnabled ? "checked" : "";
         var forexChecked = settings.ForexEnabled ? "checked" : "";
 
+        var mt5ActiveChecked = settings.Mt5AutoTradeEnabled ? "checked" : "";
+        var mt5PassiveChecked = settings.Mt5AutoTradeEnabled ? "" : "checked";
+
+        var mt5Tp1Checked = settings.Mt5TakeProfitMode == "TP1" ? "checked" : "";
+        var mt5Tp2Checked = settings.Mt5TakeProfitMode == "TP2" ? "checked" : "";
+
+        var mt5DemoChecked = settings.Mt5DemoOnly ? "checked" : "";
+        var mt5OnePositionChecked = settings.Mt5OnePositionPerSymbol ? "checked" : "";
+
+        var mt5LotSizeValue = settings.Mt5LotSize.ToString(
+            "0.##",
+            CultureInfo.InvariantCulture);
+
         var binaryStatusUrl =
             $"/api/market/status?symbol={WebUtility.UrlEncode(settings.BinaryActiveSymbol)}";
 
@@ -225,6 +239,7 @@ public class AdminController : ControllerBase
             gap: 10px;
             margin-bottom: 18px;
             font-size: 17px;
+            flex-wrap: wrap;
         }
 
         .symbols {
@@ -290,6 +305,24 @@ public class AdminController : ControllerBase
             padding: 18px;
         }
 
+        .input-control {
+            padding: 10px;
+            border-radius: 10px;
+            border: 1px solid #2b3540;
+            background: #11171d;
+            color: white;
+            width: 130px;
+        }
+
+        .select-control {
+            padding: 10px;
+            border-radius: 10px;
+            border: 1px solid #2b3540;
+            background: #11171d;
+            color: white;
+            width: 130px;
+        }
+
         a {
             color: #7dd3fc;
             text-decoration: none;
@@ -310,6 +343,11 @@ public class AdminController : ControllerBase
 
         .danger {
             color: #ef4444;
+            font-weight: bold;
+        }
+
+        .warning {
+            color: #fbbf24;
             font-weight: bold;
         }
 
@@ -425,6 +463,117 @@ public class AdminController : ControllerBase
         </div>
     </div>
 
+    <div class="status">
+        <h2>MT5 Auto Trade</h2>
+
+        <div class="enabled-row">
+            <label>
+                <input type="radio" name="mt5AutoTradeEnabled" value="true" {{mt5ActiveChecked}} />
+                MT5 avtomatik trade aktiv
+            </label>
+
+            <label>
+                <input type="radio" name="mt5AutoTradeEnabled" value="false" {{mt5PassiveChecked}} />
+                MT5 avtomatik trade deaktiv
+            </label>
+        </div>
+
+        <div class="grid">
+            <div>
+                <label class="enabled-row">
+                    Lot Size:
+                    <input
+                        type="number"
+                        id="mt5LotSize"
+                        min="0.01"
+                        step="0.01"
+                        value="{{mt5LotSizeValue}}"
+                        class="input-control" />
+                </label>
+
+                <label class="enabled-row">
+                    Minimum Confidence:
+                    <input
+                        type="number"
+                        id="mt5MinimumConfidence"
+                        min="50"
+                        max="99"
+                        step="1"
+                        value="{{settings.Mt5MinimumConfidence}}"
+                        class="input-control" />
+                </label>
+
+                <label class="enabled-row">
+                    Minimum Grade:
+                    <select id="mt5MinimumGrade" class="select-control">
+                        <option value="B" {{(settings.Mt5MinimumGrade == "B" ? "selected" : "")}}>B</option>
+                        <option value="A" {{(settings.Mt5MinimumGrade == "A" ? "selected" : "")}}>A</option>
+                        <option value="A+" {{(settings.Mt5MinimumGrade == "A+" ? "selected" : "")}}>A+</option>
+                    </select>
+                </label>
+            </div>
+
+            <div>
+                <div class="enabled-row">
+                    Take Profit:
+                    <label>
+                        <input type="radio" name="mt5TakeProfitMode" value="TP1" {{mt5Tp1Checked}} />
+                        TP1
+                    </label>
+
+                    <label>
+                        <input type="radio" name="mt5TakeProfitMode" value="TP2" {{mt5Tp2Checked}} />
+                        TP2
+                    </label>
+                </div>
+
+                <label class="enabled-row">
+                    Cooldown dəqiqə:
+                    <input
+                        type="number"
+                        id="mt5CooldownMinutes"
+                        min="0"
+                        max="1440"
+                        step="1"
+                        value="{{settings.Mt5CooldownMinutes}}"
+                        class="input-control" />
+                </label>
+
+                <label class="enabled-row">
+                    Günlük max trade:
+                    <input
+                        type="number"
+                        id="mt5MaxTradesPerDay"
+                        min="1"
+                        max="100"
+                        step="1"
+                        value="{{settings.Mt5MaxTradesPerDay}}"
+                        class="input-control" />
+                </label>
+
+                <label class="enabled-row">
+                    <input type="checkbox" id="mt5DemoOnly" {{mt5DemoChecked}} />
+                    Yalnız demo hesab
+                </label>
+
+                <label class="enabled-row">
+                    <input type="checkbox" id="mt5OnePositionPerSymbol" {{mt5OnePositionChecked}} />
+                    Eyni symbol üzrə ikinci position açma
+                </label>
+            </div>
+        </div>
+
+        <p class="muted">
+            Qeyd: Telegram-a real Forex signal gedəndə, MT5 AutoTrade aktivdirsə, order queue-ya əlavə olunacaq.
+        </p>
+
+        <p>
+            <a href="/api/mt5/status" target="_blank">
+                MT5 order statusuna bax
+            </a>
+        </p>
+    </div>
+
     <div class="actions">
         <button onclick="saveSettings()">Yadda saxla</button>
         <button onclick="location.reload()">Yenilə</button>
@@ -446,6 +595,17 @@ public class AdminController : ControllerBase
             <span id="forexState">{{(settings.ForexEnabled ? "Aktiv" : "Deaktiv")}}</span>
             /
             <strong id="forexSymbol">{{WebUtility.HtmlEncode(settings.ForexActiveSymbol)}}</strong>
+        </p>
+
+        <p>
+            MT5 AutoTrade:
+            <span id="mt5State">{{(settings.Mt5AutoTradeEnabled ? "Aktiv" : "Deaktiv")}}</span>
+            /
+            Lot:
+            <strong id="mt5LotStatus">{{mt5LotSizeValue}}</strong>
+            /
+            TP:
+            <strong id="mt5TpStatus">{{WebUtility.HtmlEncode(settings.Mt5TakeProfitMode)}}</strong>
         </p>
 
         <p class="muted">
@@ -509,6 +669,18 @@ async function saveSettings() {
     const binaryActiveSymbol = document.querySelector("input[name='binaryActiveSymbol']:checked").value;
     const forexActiveSymbol = document.querySelector("input[name='forexActiveSymbol']:checked").value;
 
+    const mt5AutoTradeEnabled =
+        document.querySelector("input[name='mt5AutoTradeEnabled']:checked").value === "true";
+
+    const mt5LotSize = Number(document.getElementById("mt5LotSize").value);
+    const mt5TakeProfitMode = document.querySelector("input[name='mt5TakeProfitMode']:checked").value;
+    const mt5MinimumConfidence = Number(document.getElementById("mt5MinimumConfidence").value);
+    const mt5MinimumGrade = document.getElementById("mt5MinimumGrade").value;
+    const mt5CooldownMinutes = Number(document.getElementById("mt5CooldownMinutes").value);
+    const mt5MaxTradesPerDay = Number(document.getElementById("mt5MaxTradesPerDay").value);
+    const mt5DemoOnly = document.getElementById("mt5DemoOnly").checked;
+    const mt5OnePositionPerSymbol = document.getElementById("mt5OnePositionPerSymbol").checked;
+
     const response = await fetch("/admin/settings", {
         method: "POST",
         headers: {
@@ -518,7 +690,16 @@ async function saveSettings() {
             binaryEnabled,
             binaryActiveSymbol,
             forexEnabled,
-            forexActiveSymbol
+            forexActiveSymbol,
+            mt5AutoTradeEnabled,
+            mt5LotSize,
+            mt5TakeProfitMode,
+            mt5MinimumConfidence,
+            mt5MinimumGrade,
+            mt5CooldownMinutes,
+            mt5MaxTradesPerDay,
+            mt5DemoOnly,
+            mt5OnePositionPerSymbol
         })
     });
 
@@ -536,7 +717,13 @@ async function saveSettings() {
     document.getElementById("forexState").innerText = settings.forexEnabled ? "Aktiv" : "Deaktiv";
     document.getElementById("binarySymbol").innerText = settings.binaryActiveSymbol;
     document.getElementById("forexSymbol").innerText = settings.forexActiveSymbol;
-    document.getElementById("updatedAt").innerText = settings.updatedAtUtc.replace("T", " ").substring(0, 19);
+
+    document.getElementById("mt5State").innerText = settings.mt5AutoTradeEnabled ? "Aktiv" : "Deaktiv";
+    document.getElementById("mt5LotStatus").innerText = settings.mt5LotSize;
+    document.getElementById("mt5TpStatus").innerText = settings.mt5TakeProfitMode;
+
+    document.getElementById("updatedAt").innerText =
+        settings.updatedAtUtc.replace("T", " ").substring(0, 19);
 
     document.getElementById("binaryStatusLink").href =
         "/api/market/status?symbol=" + encodeURIComponent(settings.binaryActiveSymbol);
@@ -780,6 +967,7 @@ async function clearCharts(folderName) {
     {
         public string FolderName { get; set; } = string.Empty;
     }
+
     private sealed class ChartFileInfo
     {
         public string FileName { get; set; } = string.Empty;

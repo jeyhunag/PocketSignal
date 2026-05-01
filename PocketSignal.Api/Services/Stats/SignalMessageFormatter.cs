@@ -11,78 +11,39 @@ public static class SignalMessageFormatter
 
         if (signal.Direction == "WAIT")
         {
-            sb.AppendLine($"{signal.Symbol} WAIT");
-            sb.AppendLine();
-            sb.AppendLine($"Confidence: {signal.Confidence}%");
-            sb.AppendLine($"Grade: {signal.Grade}");
-            sb.AppendLine($"Last Close: {signal.LastClose}");
-
-            if (!string.IsNullOrWhiteSpace(signal.ExpiryReason))
-            {
-                sb.AppendLine($"Expiry Reason: {signal.ExpiryReason}");
-            }
-
-            sb.AppendLine();
-            sb.AppendLine("Reasons:");
-
-            foreach (var reason in signal.Reasons)
-            {
-                sb.AppendLine($"- {reason}");
-            }
-
-            AppendSideAnalyses(sb, signal);
-
-            sb.AppendLine();
-            sb.AppendLine($"Time UTC: {signal.CreatedAtUtc:yyyy-MM-dd HH:mm:ss}");
-
+            sb.AppendLine($"{signal.Symbol} WAIT {signal.Confidence}%");
             return sb.ToString();
         }
 
-        sb.AppendLine($"🚨 {signal.Symbol} {signal.Direction} {signal.ExpiryMinutes} dəqiqəlik aç");
-        sb.AppendLine();
-        sb.AppendLine($"Confidence: {signal.Confidence}%");
-        sb.AppendLine($"Grade: {signal.Grade}");
-        sb.AppendLine($"Entry: {signal.EntryType}");
-        sb.AppendLine($"Valid: {signal.ValidForSeconds} saniyə");
-        sb.AppendLine($"Last Close: {signal.LastClose}");
-        if (!string.IsNullOrWhiteSpace(signal.ExpiryReason))
-        {
-            sb.AppendLine($"Expiry Reason: {signal.ExpiryReason}");
-        }
+        var directionText = ToTitle(signal.Direction);
+
+        sb.AppendLine($"🚨 {signal.Symbol} {directionText} {signal.Confidence}% | {signal.ExpiryMinutes} dəqiqə");
         sb.AppendLine();
 
-        if (!string.IsNullOrWhiteSpace(signal.InvalidIf))
+        if (signal.ValidForSeconds > 0)
         {
-            sb.AppendLine($"Invalid if: {signal.InvalidIf}");
+            sb.AppendLine($"Valid: {signal.ValidForSeconds} saniyə");
             sb.AppendLine();
         }
 
-        sb.AppendLine("Reasons:");
-
-        foreach (var reason in signal.Reasons)
+        if (!string.IsNullOrWhiteSpace(signal.InvalidIf))
         {
-            sb.AppendLine($"- {reason}");
+            sb.AppendLine("Invalid if:");
+            sb.AppendLine(signal.InvalidIf);
         }
-
-        AppendSideAnalyses(sb, signal);
-
-        sb.AppendLine();
-        sb.AppendLine($"Time UTC: {signal.CreatedAtUtc:yyyy-MM-dd HH:mm:ss}");
 
         return sb.ToString();
     }
 
-    private static void AppendSideAnalyses(StringBuilder sb, SmartTradeSignal signal)
+    private static string ToTitle(string direction)
     {
-        if (signal.SideAnalyses.Count == 0)
-            return;
+        direction = direction.Trim().ToUpperInvariant();
 
-        sb.AppendLine();
-        sb.AppendLine("Side Scores:");
-
-        foreach (var side in signal.SideAnalyses)
+        return direction switch
         {
-            sb.AppendLine($"- {side.Direction}: {side.Score}");
-        }
+            "LONG" => "Long",
+            "SHORT" => "Short",
+            _ => direction
+        };
     }
 }
