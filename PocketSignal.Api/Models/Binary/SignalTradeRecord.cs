@@ -31,4 +31,8 @@ public class SignalTradeRecord
     public DateTime DueAtUtc { get; set; }
 
     public DateTime? CheckedAtUtc { get; set; }
+
+    public DateTime? ResultNotifiedAtUtc { get; set; }
+
+    public string ResultNotificationMessage { get; set; } = string.Empty;
 }

@@ -10,6 +10,7 @@ using PocketSignal.Api.Services.Stats;
 using PocketSignal.Api.Services.Telegram;
 using PocketSignal.Api.Services.Workers;
 using PocketSignal.Api.Services.Mt5;
+using PocketSignal.Api.Services.Analysis;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -47,15 +48,18 @@ builder.Services.AddHttpClient<IMarketDataService, TwelveDataMarketDataService>(
 // Admin runtime settings
 builder.Services.AddSingleton<IAdminRuntimeSettingsService, AdminRuntimeSettingsService>();
 
+// Core analysis engine
+builder.Services.AddSingleton<IMarketAnalysisEngine, MarketAnalysisEngine>();
+
 // Binary services
-builder.Services.AddScoped<ISmartSignalService, SmartMoneySignalService>();
+builder.Services.AddScoped<ISmartSignalService, CoreBinarySignalService>();
 builder.Services.AddScoped<ISignalNotificationService, SignalNotificationService>();
 builder.Services.AddScoped<IBinaryChartImageService, BinaryChartImageService>();
 builder.Services.AddSingleton<ISignalResultTracker, SignalResultTracker>();
 builder.Services.AddSingleton<IDailyStatsService, DailyStatsService>();
 
 // Forex services
-builder.Services.AddScoped<IForexSignalService, BalancedForexSignalService>();
+builder.Services.AddScoped<IForexSignalService, CoreForexSignalService>();
 builder.Services.AddScoped<IForexNotificationService, ForexNotificationService>();
 builder.Services.AddScoped<IForexSignalDatabaseService, ForexSignalDatabaseService>();
 builder.Services.AddScoped<IForexChartImageService, ForexChartImageService>();

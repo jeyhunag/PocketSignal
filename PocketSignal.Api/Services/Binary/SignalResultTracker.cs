@@ -2,6 +2,7 @@
 using System.Text;
 using PocketSignal.Api.Models.Binary;
 using PocketSignal.Api.Services.MarketData;
+using PocketSignal.Api.Services.Telegram;
 
 namespace PocketSignal.Api.Services.Binary;
 
@@ -9,11 +10,19 @@ public class SignalResultTracker : ISignalResultTracker
 {
     private readonly object _lock = new();
     private readonly List<SignalTradeRecord> _trades = new();
-    private readonly IMarketDataService _marketDataService;
 
-    public SignalResultTracker(IMarketDataService marketDataService)
+    private readonly IMarketDataService _marketDataService;
+    private readonly ITelegramService _telegramService;
+    private readonly ILogger<SignalResultTracker> _logger;
+
+    public SignalResultTracker(
+        IMarketDataService marketDataService,
+        ITelegramService telegramService,
+        ILogger<SignalResultTracker> logger)
     {
         _marketDataService = marketDataService;
+        _telegramService = telegramService;
+        _logger = logger;
     }
 
     public SignalTradeRecord? RegisterSignal(SmartTradeSignal signal)
@@ -21,8 +30,16 @@ public class SignalResultTracker : ISignalResultTracker
         if (signal.Direction == "WAIT")
             return null;
 
+        if (signal.Direction != "LONG" && signal.Direction != "SHORT")
+            return null;
+
         if (signal.ExpiryMinutes <= 0)
             return null;
+
+        if (signal.LastClose <= 0)
+            return null;
+
+        var nowUtc = DateTime.UtcNow;
 
         var record = new SignalTradeRecord
         {
@@ -34,8 +51,8 @@ public class SignalResultTracker : ISignalResultTracker
             EntryPrice = signal.LastClose,
             SignalMessage = signal.Message,
             ExpiryReason = signal.ExpiryReason,
-            CreatedAtUtc = DateTime.UtcNow,
-            DueAtUtc = DateTime.UtcNow.AddMinutes(signal.ExpiryMinutes),
+            CreatedAtUtc = nowUtc,
+            DueAtUtc = nowUtc.AddMinutes(signal.ExpiryMinutes),
             Result = "PENDING"
         };
 
@@ -54,28 +71,31 @@ public class SignalResultTracker : ISignalResultTracker
         lock (_lock)
         {
             dueTrades = _trades
-                .Where(x => x.Result == "PENDING" && x.DueAtUtc <= DateTime.UtcNow)
+                .Where(x =>
+                    x.Result == "PENDING" &&
+                    x.DueAtUtc <= DateTime.UtcNow)
+                .OrderBy(x => x.DueAtUtc)
                 .ToList();
         }
 
         foreach (var trade in dueTrades)
         {
-            var exitPrice = await GetLatestCloseAsync(trade.Symbol, cancellationToken);
-
-            if (exitPrice == null)
-                continue;
-
-            var result = CalculateResult(
-                trade.Direction,
-                trade.EntryPrice,
-                exitPrice.Value);
-
-            lock (_lock)
+            try
             {
-                trade.ExitPrice = exitPrice.Value;
-                trade.Difference = exitPrice.Value - trade.EntryPrice;
-                trade.Result = result;
-                trade.CheckedAtUtc = DateTime.UtcNow;
+                await EvaluateSingleTradeAsync(trade, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Binary result yoxlanmadi. TradeId: {TradeId} | {Symbol} {Direction}",
+                    trade.Id,
+                    trade.Symbol,
+                    trade.Direction);
             }
         }
     }
@@ -110,7 +130,7 @@ public class SignalResultTracker : ISignalResultTracker
 
         var sb = new StringBuilder();
 
-        sb.AppendLine($"Signal Results - {DateTime.UtcNow:yyyy-MM-dd}");
+        sb.AppendLine($"Binary Signal Results - {DateTime.UtcNow:yyyy-MM-dd}");
         sb.AppendLine();
 
         sb.AppendLine($"Total signals: {total}");
@@ -123,7 +143,7 @@ public class SignalResultTracker : ISignalResultTracker
 
         if (trades.Count == 0)
         {
-            sb.AppendLine("Bugun hele LONG/SHORT signal qeyde alinmayib.");
+            sb.AppendLine("Bugun hele binary LONG/SHORT signal qeyde alinmayib.");
             return sb.ToString();
         }
 
@@ -144,10 +164,102 @@ public class SignalResultTracker : ISignalResultTracker
             if (trade.CheckedAtUtc != null)
                 sb.AppendLine($"Checked: {trade.CheckedAtUtc:HH:mm:ss} UTC");
 
+            if (trade.ResultNotifiedAtUtc != null)
+                sb.AppendLine($"Telegram result sent: {trade.ResultNotifiedAtUtc:HH:mm:ss} UTC");
+
             sb.AppendLine();
         }
 
         return sb.ToString();
+    }
+
+    private async Task EvaluateSingleTradeAsync(
+        SignalTradeRecord trade,
+        CancellationToken cancellationToken)
+    {
+        var exitPrice = await GetLatestCloseAsync(
+            trade.Symbol,
+            cancellationToken);
+
+        if (exitPrice == null)
+        {
+            _logger.LogInformation(
+                "Binary result ucun exit price tapilmadi. TradeId: {TradeId} | Symbol: {Symbol}",
+                trade.Id,
+                trade.Symbol);
+
+            return;
+        }
+
+        string result;
+        decimal difference;
+
+        lock (_lock)
+        {
+            if (trade.Result != "PENDING")
+                return;
+
+            result = CalculateResult(
+                trade.Direction,
+                trade.EntryPrice,
+                exitPrice.Value);
+
+            difference = exitPrice.Value - trade.EntryPrice;
+
+            trade.ExitPrice = exitPrice.Value;
+            trade.Difference = difference;
+            trade.Result = result;
+            trade.CheckedAtUtc = DateTime.UtcNow;
+        }
+
+        await NotifyResultOnceAsync(
+            trade,
+            cancellationToken);
+    }
+
+    private async Task NotifyResultOnceAsync(
+        SignalTradeRecord trade,
+        CancellationToken cancellationToken)
+    {
+        string message;
+
+        lock (_lock)
+        {
+            if (trade.ResultNotifiedAtUtc != null)
+                return;
+
+            if (trade.Result == "PENDING")
+                return;
+
+            message = FormatResultMessage(trade);
+
+            trade.ResultNotificationMessage = message;
+            trade.ResultNotifiedAtUtc = DateTime.UtcNow;
+        }
+
+        try
+        {
+            await _telegramService.SendMessageAsync(
+                message,
+                cancellationToken);
+
+            _logger.LogInformation(
+                "Binary result Telegram-a gonderildi. TradeId: {TradeId} | {Symbol} {Direction} | Result: {Result}",
+                trade.Id,
+                trade.Symbol,
+                trade.Direction,
+                trade.Result);
+        }
+        catch
+        {
+            lock (_lock)
+            {
+                trade.ResultNotifiedAtUtc = null;
+                trade.ResultNotificationMessage = string.Empty;
+            }
+
+            throw;
+        }
     }
 
     private async Task<decimal?> GetLatestCloseAsync(
@@ -195,6 +307,15 @@ public class SignalResultTracker : ISignalResultTracker
             return time;
         }
 
+        if (DateTime.TryParse(
+                value,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var parsed))
+        {
+            return parsed;
+        }
+
         return null;
     }
 
@@ -213,5 +334,45 @@ public class SignalResultTracker : ISignalResultTracker
             return exitPrice < entryPrice ? "WIN" : "LOSS";
 
         return "DRAW";
+    }
+
+    private static string FormatResultMessage(SignalTradeRecord trade)
+    {
+        var icon = trade.Result switch
+        {
+            "WIN" => "✅",
+            "LOSS" => "❌",
+            "DRAW" => "➖",
+            _ => "ℹ️"
+        };
+
+        var titleResult = trade.Result switch
+        {
+            "WIN" => "WIN",
+            "LOSS" => "LOSS",
+            "DRAW" => "DRAW",
+            _ => trade.Result
+        };
+
+        return
+$"""
+{icon} {trade.Symbol} {trade.Direction} {titleResult}
+
+Entry: {FormatPrice(trade.EntryPrice)}
+Exit: {FormatPrice(trade.ExitPrice)}
+Difference: {FormatPrice(trade.Difference)}
+
+Expiry: {trade.ExpiryMinutes} dəqiqə
+Confidence: {trade.Confidence}%
+Grade: {trade.Grade}
+""";
+    }
+
+    private static string FormatPrice(decimal? value)
+    {
+        if (value == null)
+            return "-";
+
+        return value.Value.ToString("0.#####", CultureInfo.InvariantCulture);
     }
 }

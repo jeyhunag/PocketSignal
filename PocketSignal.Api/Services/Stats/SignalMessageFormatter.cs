@@ -15,9 +15,13 @@ public static class SignalMessageFormatter
             return sb.ToString();
         }
 
-        var directionText = ToTitle(signal.Direction);
+        var direction = signal.Direction == "LONG"
+            ? "Long"
+            : signal.Direction == "SHORT"
+                ? "Short"
+                : signal.Direction;
 
-        sb.AppendLine($"🚨 {signal.Symbol} {directionText} {signal.Confidence}% | {signal.ExpiryMinutes} dəqiqə");
+        sb.AppendLine($"🚨 {signal.Symbol} {direction} {signal.Confidence}% | {signal.ExpiryMinutes} dəqiqə");
         sb.AppendLine();
 
         if (signal.ValidForSeconds > 0)
@@ -33,17 +37,5 @@ public static class SignalMessageFormatter
         }
 
         return sb.ToString();
-    }
-
-    private static string ToTitle(string direction)
-    {
-        direction = direction.Trim().ToUpperInvariant();
-
-        return direction switch
-        {
-            "LONG" => "Long",
-            "SHORT" => "Short",
-            _ => direction
-        };
     }
 }
