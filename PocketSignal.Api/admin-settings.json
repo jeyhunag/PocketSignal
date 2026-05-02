@@ -1,5 +1,5 @@
 {
-  "binaryEnabled": false,
+  "binaryEnabled": true,
   "binaryActiveSymbol": "EUR/USD",
   "binarySymbols": [
     "EUR/USD",
@@ -34,5 +34,5 @@
   "mt5MaxTradesPerDay": 10,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-02T16:24:36.8498784Z"
+  "updatedAtUtc": "2026-05-02T16:47:49.2187884Z"
 }
