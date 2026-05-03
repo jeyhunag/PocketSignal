@@ -12,6 +12,40 @@ public static class SignalMessageFormatter
         if (signal.Direction == "WAIT")
         {
             sb.AppendLine($"{signal.Symbol} WAIT {signal.Confidence}%");
+            sb.AppendLine();
+
+            if (!string.IsNullOrWhiteSpace(signal.ExpiryReason))
+            {
+                sb.AppendLine($"Reason: {signal.ExpiryReason}");
+                sb.AppendLine();
+            }
+
+            if (signal.Reasons.Count > 0)
+            {
+                sb.AppendLine("Details:");
+
+                foreach (var reason in signal.Reasons.Take(12))
+                {
+                    sb.AppendLine($"- {reason}");
+                }
+
+                sb.AppendLine();
+            }
+
+            if (signal.SideAnalyses.Count > 0)
+            {
+                sb.AppendLine("Side Scores:");
+
+                foreach (var side in signal.SideAnalyses)
+                {
+                    sb.AppendLine($"- {side.Direction}: {side.Score}");
+                }
+
+                sb.AppendLine();
+            }
+
+            sb.AppendLine($"Time UTC: {signal.CreatedAtUtc:yyyy-MM-dd HH:mm:ss}");
+
             return sb.ToString();
         }
 

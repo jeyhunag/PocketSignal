@@ -1,6 +1,6 @@
 {
   "binaryEnabled": true,
-  "binaryActiveSymbol": "EUR/USD",
+  "binaryActiveSymbol": "GBP/USD",
   "binarySymbols": [
     "EUR/USD",
     "GBP/USD",
@@ -12,7 +12,7 @@
     "EUR/JPY"
   ],
   "forexEnabled": true,
-  "forexActiveSymbol": "BTC/USD",
+  "forexActiveSymbol": "EUR/USD",
   "forexSymbols": [
     "GBP/JPY",
     "EUR/USD",
@@ -34,5 +34,5 @@
   "mt5MaxTradesPerDay": 10,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-02T16:47:49.2187884Z"
+  "updatedAtUtc": "2026-05-03T22:50:21.0250487Z"
 }

@@ -103,10 +103,7 @@ public class CoreForexSignalService : IForexSignalService
         if (opposite != null &&
             Math.Abs(best.Confidence - opposite.Confidence) < 8)
         {
-            var results = BuildStrategyResults(
-                best,
-                opposite,
-                m15Trend);
+            var results = BuildStrategyResults(best, opposite, m15Trend);
 
             return Wait(
                 symbol,
@@ -124,10 +121,7 @@ public class CoreForexSignalService : IForexSignalService
 
         if (!best.IsPriceInEntryZone)
         {
-            var results = BuildStrategyResults(
-                best,
-                opposite,
-                m15Trend);
+            var results = BuildStrategyResults(best, opposite, m15Trend);
 
             return Wait(
                 symbol,
@@ -144,10 +138,7 @@ public class CoreForexSignalService : IForexSignalService
 
         if (!best.HasEntryConfirmation)
         {
-            var results = BuildStrategyResults(
-                best,
-                opposite,
-                m15Trend);
+            var results = BuildStrategyResults(best, opposite, m15Trend);
 
             return Wait(
                 symbol,
@@ -164,10 +155,7 @@ public class CoreForexSignalService : IForexSignalService
 
         if (!best.IsFreshFvg)
         {
-            var results = BuildStrategyResults(
-                best,
-                opposite,
-                m15Trend);
+            var results = BuildStrategyResults(best, opposite, m15Trend);
 
             return Wait(
                 symbol,
@@ -183,10 +171,7 @@ public class CoreForexSignalService : IForexSignalService
 
         if (!best.IsRiskPlanValid)
         {
-            var results = BuildStrategyResults(
-                best,
-                opposite,
-                m15Trend);
+            var results = BuildStrategyResults(best, opposite, m15Trend);
 
             return Wait(
                 symbol,
@@ -202,10 +187,7 @@ public class CoreForexSignalService : IForexSignalService
 
         if (best.Confidence < MinimumConfidence)
         {
-            var results = BuildStrategyResults(
-                best,
-                opposite,
-                m15Trend);
+            var results = BuildStrategyResults(best, opposite, m15Trend);
 
             return Wait(
                 symbol,
@@ -231,12 +213,9 @@ public class CoreForexSignalService : IForexSignalService
 
         reasons.AddRange(best.Reasons);
 
-        var strategyResultsFinal = BuildStrategyResults(
-            best,
-            opposite,
-            m15Trend);
+        var strategyResultsFinal = BuildStrategyResults(best, opposite, m15Trend);
 
-        var entryPrice = RoundPrice(symbol, best.EntryPrice);
+        var entry = RoundPrice(symbol, best.EntryPrice);
         var stopLoss = RoundPrice(symbol, best.StopLoss);
         var takeProfit1 = RoundPrice(symbol, best.TakeProfit1);
         var takeProfit2 = RoundPrice(symbol, best.TakeProfit2);
@@ -246,7 +225,7 @@ public class CoreForexSignalService : IForexSignalService
             Symbol = symbol,
             Direction = best.Direction,
 
-            EntryPrice = entryPrice,
+            EntryPrice = entry,
             StopLoss = stopLoss,
             TakeProfit1 = takeProfit1,
             TakeProfit2 = takeProfit2,
@@ -261,7 +240,7 @@ public class CoreForexSignalService : IForexSignalService
             Grade = GetGrade(best.Confidence),
 
             Message =
-                $"{symbol} {best.Direction} Entry: {entryPrice} SL: {stopLoss} TP1: {takeProfit1} TP2: {takeProfit2}",
+                $"{symbol} {best.Direction} Entry: {entry} SL: {stopLoss} TP1: {takeProfit1} TP2: {takeProfit2}",
 
             InvalidIf = best.Direction == "LONG"
                 ? $"M1 candle {RoundPrice(symbol, best.ZoneLow)} altinda baglansa trade legvdir."
@@ -290,9 +269,7 @@ public class CoreForexSignalService : IForexSignalService
         List<PriceCandle> m1,
         string m15Trend)
     {
-        var fvgZones = DetectFreshFvgs(
-            m15,
-            direction);
+        var fvgZones = DetectFreshFvgs(m15, direction);
 
         if (fvgZones.Count == 0)
             return null;
@@ -301,21 +278,13 @@ public class CoreForexSignalService : IForexSignalService
 
         foreach (var fvg in fvgZones)
         {
-            var breaker = FindBreakerBlockForFvg(
-                m15,
-                direction,
-                fvg);
+            var breaker = FindBreakerBlockForFvg(m15, direction, fvg);
 
             if (breaker == null)
                 continue;
 
-            var overlapLow = Math.Max(
-                fvg.Low,
-                breaker.Low);
-
-            var overlapHigh = Math.Min(
-                fvg.High,
-                breaker.High);
+            var overlapLow = Math.Max(fvg.Low, breaker.Low);
+            var overlapHigh = Math.Min(fvg.High, breaker.High);
 
             if (overlapLow >= overlapHigh)
                 continue;
@@ -351,34 +320,22 @@ public class CoreForexSignalService : IForexSignalService
         double zoneHigh)
     {
         var lastM1 = m1[^1];
-        var entry = lastM1.Close;
+        var entryDouble = lastM1.Close;
 
-        var avgM1Range = AverageRange(
-            m1.TakeLast(30).ToList());
-
+        var avgM1Range = AverageRange(m1.TakeLast(30).ToList());
         var tolerance = avgM1Range * 1.2;
 
         var priceTouchedZone = direction == "LONG"
-            ? lastM1.Low <= zoneHigh + tolerance &&
-              lastM1.Close >= zoneLow - tolerance
-            : lastM1.High >= zoneLow - tolerance &&
-              lastM1.Close <= zoneHigh + tolerance;
+            ? lastM1.Low <= zoneHigh + tolerance && lastM1.Close >= zoneLow - tolerance
+            : lastM1.High >= zoneLow - tolerance && lastM1.Close <= zoneHigh + tolerance;
 
         var priceInsideZone =
-            entry >= zoneLow - tolerance &&
-            entry <= zoneHigh + tolerance;
+            entryDouble >= zoneLow - tolerance &&
+            entryDouble <= zoneHigh + tolerance;
 
         var rejection = direction == "LONG"
-            ? HasBullishRejectionFromZone(
-                m1,
-                zoneLow,
-                zoneHigh,
-                avgM1Range)
-            : HasBearishRejectionFromZone(
-                m1,
-                zoneLow,
-                zoneHigh,
-                avgM1Range);
+            ? HasBullishRejectionFromZone(m1, zoneLow, zoneHigh, avgM1Range)
+            : HasBearishRejectionFromZone(m1, zoneLow, zoneHigh, avgM1Range);
 
         var confidence = 0;
         var reasons = new List<string>();
@@ -420,56 +377,51 @@ public class CoreForexSignalService : IForexSignalService
         var stopBuffer = avgM1Range * 0.8;
 
         if (stopBuffer <= 0)
-            stopBuffer = entry * 0.0005;
+            stopBuffer = entryDouble * 0.0005;
+
+        var entry = (decimal)entryDouble;
+        var zoneLowDecimal = (decimal)zoneLow;
+        var zoneHighDecimal = (decimal)zoneHigh;
+        var buffer = (decimal)stopBuffer;
 
         decimal stopLoss;
         decimal takeProfit1;
         decimal takeProfit2;
         decimal risk;
 
-        var entryDecimal = (decimal)entry;
-        var zoneLowDecimal = (decimal)zoneLow;
-        var zoneHighDecimal = (decimal)zoneHigh;
-        var bufferDecimal = (decimal)stopBuffer;
-
         if (direction == "LONG")
         {
-            stopLoss = zoneLowDecimal - bufferDecimal;
+            stopLoss = zoneLowDecimal - buffer;
 
-            if (stopLoss >= entryDecimal)
-                stopLoss = entryDecimal - Math.Abs(bufferDecimal);
+            if (stopLoss >= entry)
+                stopLoss = entry - Math.Abs(buffer);
 
-            risk = entryDecimal - stopLoss;
+            risk = entry - stopLoss;
 
-            takeProfit1 = entryDecimal + risk * 2m;
-            takeProfit2 = entryDecimal + risk * 3m;
+            takeProfit1 = entry + risk * 2m;
+            takeProfit2 = entry + risk * 3m;
         }
         else
         {
-            stopLoss = zoneHighDecimal + bufferDecimal;
+            stopLoss = zoneHighDecimal + buffer;
 
-            if (stopLoss <= entryDecimal)
-                stopLoss = entryDecimal + Math.Abs(bufferDecimal);
+            if (stopLoss <= entry)
+                stopLoss = entry + Math.Abs(buffer);
 
-            risk = stopLoss - entryDecimal;
+            risk = stopLoss - entry;
 
-            takeProfit1 = entryDecimal - risk * 2m;
-            takeProfit2 = entryDecimal - risk * 3m;
+            takeProfit1 = entry - risk * 2m;
+            takeProfit2 = entry - risk * 3m;
         }
 
         var pipSize = GetPipSize(symbol);
 
         var riskPips = risk / pipSize;
-        var rewardPips1 = Math.Abs(takeProfit1 - entryDecimal) / pipSize;
-        var rewardPips2 = Math.Abs(takeProfit2 - entryDecimal) / pipSize;
+        var rewardPips1 = Math.Abs(takeProfit1 - entry) / pipSize;
+        var rewardPips2 = Math.Abs(takeProfit2 - entry) / pipSize;
 
-        var riskReward1 = riskPips > 0
-            ? rewardPips1 / riskPips
-            : 0;
-
-        var riskReward2 = riskPips > 0
-            ? rewardPips2 / riskPips
-            : 0;
+        var riskReward1 = riskPips > 0 ? rewardPips1 / riskPips : 0;
+        var riskReward2 = riskPips > 0 ? rewardPips2 / riskPips : 0;
 
         var isRiskValid =
             risk > 0 &&
@@ -492,10 +444,7 @@ public class CoreForexSignalService : IForexSignalService
             isRiskValid = false;
         }
 
-        confidence = Math.Clamp(
-            confidence,
-            0,
-            100);
+        confidence = Math.Clamp(confidence, 0, 100);
 
         return new UnicornCandidate
         {
@@ -504,7 +453,7 @@ public class CoreForexSignalService : IForexSignalService
             Breaker = breaker,
             ZoneLow = zoneLow,
             ZoneHigh = zoneHigh,
-            EntryPrice = entryDecimal,
+            EntryPrice = entry,
             StopLoss = stopLoss,
             TakeProfit1 = takeProfit1,
             TakeProfit2 = takeProfit2,
@@ -537,8 +486,7 @@ public class CoreForexSignalService : IForexSignalService
 
             if (direction == "LONG")
             {
-                if (c1.High < c3.Low &&
-                    c3.Close > c3.Open)
+                if (c1.High < c3.Low && c3.Close > c3.Open)
                 {
                     var zone = new Zone
                     {
@@ -547,11 +495,7 @@ public class CoreForexSignalService : IForexSignalService
                         Low = c1.High,
                         High = c3.Low,
                         CreatedIndex = i,
-                        IsFresh = IsFvgFresh(
-                            candles,
-                            i,
-                            c1.High,
-                            c3.Low)
+                        IsFresh = IsFvgFresh(candles, i, c1.High, c3.Low)
                     };
 
                     if (zone.IsFresh)
@@ -561,8 +505,7 @@ public class CoreForexSignalService : IForexSignalService
 
             if (direction == "SHORT")
             {
-                if (c1.Low > c3.High &&
-                    c3.Close < c3.Open)
+                if (c1.Low > c3.High && c3.Close < c3.Open)
                 {
                     var zone = new Zone
                     {
@@ -571,11 +514,7 @@ public class CoreForexSignalService : IForexSignalService
                         Low = c3.High,
                         High = c1.Low,
                         CreatedIndex = i,
-                        IsFresh = IsFvgFresh(
-                            candles,
-                            i,
-                            c3.High,
-                            c1.Low)
+                        IsFresh = IsFvgFresh(candles, i, c3.High, c1.Low)
                     };
 
                     if (zone.IsFresh)
@@ -616,9 +555,7 @@ public class CoreForexSignalService : IForexSignalService
         string direction,
         Zone fvg)
     {
-        var start = Math.Max(
-            0,
-            fvg.CreatedIndex - 12);
+        var start = Math.Max(0, fvg.CreatedIndex - 12);
 
         if (direction == "LONG")
         {
@@ -691,23 +628,13 @@ public class CoreForexSignalService : IForexSignalService
 
         foreach (var candle in recent)
         {
-            var touchedZone =
-                candle.Low <= zoneHigh &&
-                candle.High >= zoneLow;
-
+            var touchedZone = candle.Low <= zoneHigh && candle.High >= zoneLow;
             var bullish = candle.Close > candle.Open;
-
             var lowerRejection = candle.LowerWick >= candle.Body * 1.2;
-
             var strongClose = candle.Close >= candle.Low + candle.Range * 0.62;
 
-            if (touchedZone &&
-                bullish &&
-                (lowerRejection || strongClose) &&
-                candle.Range >= avgRange * 0.5)
-            {
+            if (touchedZone && bullish && (lowerRejection || strongClose) && candle.Range >= avgRange * 0.5)
                 return true;
-            }
         }
 
         return false;
@@ -723,23 +650,13 @@ public class CoreForexSignalService : IForexSignalService
 
         foreach (var candle in recent)
         {
-            var touchedZone =
-                candle.Low <= zoneHigh &&
-                candle.High >= zoneLow;
-
+            var touchedZone = candle.Low <= zoneHigh && candle.High >= zoneLow;
             var bearish = candle.Close < candle.Open;
-
             var upperRejection = candle.UpperWick >= candle.Body * 1.2;
-
             var strongClose = candle.Close <= candle.Low + candle.Range * 0.38;
 
-            if (touchedZone &&
-                bearish &&
-                (upperRejection || strongClose) &&
-                candle.Range >= avgRange * 0.5)
-            {
+            if (touchedZone && bearish && (upperRejection || strongClose) && candle.Range >= avgRange * 0.5)
                 return true;
-            }
         }
 
         return false;
@@ -757,17 +674,11 @@ public class CoreForexSignalService : IForexSignalService
 
         var avgRange = AverageRange(recent);
 
-        if (lastClose > firstClose + avgRange &&
-            fast > slow)
-        {
+        if (lastClose > firstClose + avgRange && fast > slow)
             return "BULLISH";
-        }
 
-        if (lastClose < firstClose - avgRange &&
-            fast < slow)
-        {
+        if (lastClose < firstClose - avgRange && fast < slow)
             return "BEARISH";
-        }
 
         return "RANGE";
     }
@@ -950,17 +861,13 @@ public class CoreForexSignalService : IForexSignalService
             .ToList();
     }
 
-    private static decimal RoundPrice(
-        string symbol,
-        decimal price)
+    private static decimal RoundPrice(string symbol, decimal price)
     {
         var digits = GetDigits(symbol);
         return Math.Round(price, digits);
     }
 
-    private static decimal RoundPrice(
-        string symbol,
-        double price)
+    private static decimal RoundPrice(string symbol, double price)
     {
         var digits = GetDigits(symbol);
         return Math.Round((decimal)price, digits);

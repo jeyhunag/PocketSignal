@@ -1,5 +1,6 @@
 ﻿using PocketSignal.Api.Services.Admin;
 using PocketSignal.Api.Services.Forex;
+using PocketSignal.Api.Services.MarketData;
 
 namespace PocketSignal.Api.Services.Workers;
 
@@ -30,7 +31,10 @@ public class ForexWorker : BackgroundService
         {
             try
             {
-                await CheckForexSignalsAsync(stoppingToken);
+                using (MarketDataApiGroupContext.Use("Forex"))
+                {
+                    await CheckForexSignalsAsync(stoppingToken);
+                }
             }
             catch (Exception ex)
             {

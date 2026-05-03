@@ -53,12 +53,13 @@ public class CoreBinarySignalService : ISmartSignalService
             return Wait(
                 symbol,
                 0,
-                "Cari vaxt ucun CRT session tapilmadi.");
+                $"CRT session tapilmadi. Candle time: {currentTime:yyyy-MM-dd HH:mm:ss}");
         }
 
         var rangeCandles = m15
-            .Where(x => x.TimeUtc >= session.PreviousSessionStartUtc &&
-                        x.TimeUtc < session.PreviousSessionEndUtc)
+            .Where(x =>
+                x.TimeUtc >= session.PreviousSessionStartUtc &&
+                x.TimeUtc < session.PreviousSessionEndUtc)
             .ToList();
 
         if (rangeCandles.Count < 4)
@@ -66,7 +67,7 @@ public class CoreBinarySignalService : ISmartSignalService
             return Wait(
                 symbol,
                 0,
-                "Evvelki session ucun kifayet qeder M15 candle yoxdur.");
+                $"Evvelki session ucun kifayet qeder M15 candle yoxdur. Previous session: {session.PreviousSessionName} {session.PreviousSessionStartUtc:HH:mm}-{session.PreviousSessionEndUtc:HH:mm}");
         }
 
         var upperRange = rangeCandles
@@ -86,7 +87,7 @@ public class CoreBinarySignalService : ISmartSignalService
             return Wait(
                 symbol,
                 0,
-                "Cari session ucun kifayet qeder M1 candle yoxdur.");
+                $"Cari session ucun kifayet qeder M1 candle yoxdur. Current session: {session.Name} {session.CurrentSessionStartUtc:HH:mm}-{session.CurrentSessionEndUtc:HH:mm}");
         }
 
         var shortSetup = AnalyzeCrtDirection(
@@ -529,7 +530,6 @@ public class CoreBinarySignalService : ISmartSignalService
     private static CrtSessionContext? GetCurrentSessionContext(DateTime currentTime)
     {
         var date = currentTime.Date;
-        var time = currentTime.TimeOfDay;
 
         var asiaStart = date.AddHours(0);
         var asiaEnd = date.AddHours(7);
@@ -542,6 +542,9 @@ public class CoreBinarySignalService : ISmartSignalService
 
         var londonCloseStart = date.AddHours(17);
         var londonCloseEnd = date.AddHours(20);
+
+        var lateSessionStart = date.AddHours(20);
+        var lateSessionEnd = date.AddDays(1);
 
         if (currentTime >= londonStart && currentTime < londonEnd)
         {
@@ -579,6 +582,19 @@ public class CoreBinarySignalService : ISmartSignalService
                 PreviousSessionEndUtc = newYorkEnd,
                 CurrentSessionStartUtc = londonCloseStart,
                 CurrentSessionEndUtc = londonCloseEnd
+            };
+        }
+
+        if (currentTime >= lateSessionStart && currentTime < lateSessionEnd)
+        {
+            return new CrtSessionContext
+            {
+                Name = "Late Session",
+                PreviousSessionName = "London Close",
+                PreviousSessionStartUtc = londonCloseStart,
+                PreviousSessionEndUtc = londonCloseEnd,
+                CurrentSessionStartUtc = lateSessionStart,
+                CurrentSessionEndUtc = lateSessionEnd
             };
         }
 

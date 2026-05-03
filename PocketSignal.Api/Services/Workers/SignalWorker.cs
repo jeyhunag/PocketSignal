@@ -1,5 +1,6 @@
 ﻿using PocketSignal.Api.Services.Admin;
 using PocketSignal.Api.Services.Binary;
+using PocketSignal.Api.Services.MarketData;
 using PocketSignal.Api.Services.Stats;
 
 namespace PocketSignal.Api.Services.Workers;
@@ -31,7 +32,10 @@ public class SignalWorker : BackgroundService
         {
             try
             {
-                await CheckSignalsAsync(stoppingToken);
+                using (MarketDataApiGroupContext.Use("Binary"))
+                {
+                    await CheckSignalsAsync(stoppingToken);
+                }
             }
             catch (Exception ex)
             {
@@ -113,7 +117,7 @@ public class SignalWorker : BackgroundService
             result.Message);
 
         _logger.LogInformation(
-            "Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
+            "BINARY | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
             signal.Symbol,
             signal.Direction,
             signal.Confidence,
