@@ -11,8 +11,8 @@
     "USD/CAD",
     "EUR/JPY"
   ],
-  "forexEnabled": true,
-  "forexActiveSymbol": "GBP/JPY",
+  "forexEnabled": false,
+  "forexActiveSymbol": "USD/JPY",
   "forexSymbols": [
     "GBP/JPY",
     "EUR/USD",
@@ -34,5 +34,5 @@
   "mt5MaxTradesPerDay": 10,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-04T16:09:46.5235766Z"
+  "updatedAtUtc": "2026-05-04T21:10:45.9267815Z"
 }

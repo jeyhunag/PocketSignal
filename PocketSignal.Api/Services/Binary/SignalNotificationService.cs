@@ -60,11 +60,11 @@ public class SignalNotificationService : ISignalNotificationService
         // Evvel: USD/CAD LONG 12m ve USD/CAD LONG 10m ayri sayilirdi.
         // Indi: USD/CAD LONG ucun expiry bitene qeder tekrar signal getmeyecek.
         var cacheKey =
-            $"binary-telegram-cooldown:{Normalize(signal.Symbol)}:{signal.Direction}";
+     $"binary-telegram-cooldown:{Normalize(signal.Symbol)}";
 
         if (_cache.TryGetValue(cacheKey, out _))
         {
-            return (false, $"Binary cooldown aktivdir. {signal.Symbol} {signal.Direction} ucun expiry bitmeyib.");
+            return (false, $"Binary cooldown aktivdir. {signal.Symbol} ucun evvelki signalin expiry vaxti bitmeyib.");
         }
 
         var message = SignalMessageFormatter.Format(signal);
