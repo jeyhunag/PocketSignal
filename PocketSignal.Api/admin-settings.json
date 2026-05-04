@@ -12,7 +12,7 @@
     "EUR/JPY"
   ],
   "forexEnabled": true,
-  "forexActiveSymbol": "BTC/USD",
+  "forexActiveSymbol": "GBP/JPY",
   "forexSymbols": [
     "GBP/JPY",
     "EUR/USD",
@@ -34,5 +34,5 @@
   "mt5MaxTradesPerDay": 10,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-04T13:33:22.6145508Z"
+  "updatedAtUtc": "2026-05-04T16:09:46.5235766Z"
 }

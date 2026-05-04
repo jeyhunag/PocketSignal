@@ -3,14 +3,14 @@ using Microsoft.EntityFrameworkCore;
 using PocketSignal.Api.Data;
 using PocketSignal.Api.Services;
 using PocketSignal.Api.Services.Admin;
+using PocketSignal.Api.Services.Analysis;
 using PocketSignal.Api.Services.Binary;
 using PocketSignal.Api.Services.Forex;
 using PocketSignal.Api.Services.MarketData;
+using PocketSignal.Api.Services.Mt5;
 using PocketSignal.Api.Services.Stats;
 using PocketSignal.Api.Services.Telegram;
 using PocketSignal.Api.Services.Workers;
-using PocketSignal.Api.Services.Mt5;
-using PocketSignal.Api.Services.Analysis;
 
 var builder = WebApplication.CreateBuilder(args);
 
