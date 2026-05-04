@@ -40,19 +40,22 @@ public class MarketController : ControllerBase
         [FromQuery] int outputSize = 100,
         CancellationToken cancellationToken = default)
     {
-        var result = await _marketDataService.GetCandlesAsync(
-            symbol,
-            interval,
-            outputSize,
-            cancellationToken);
+        using (MarketDataApiGroupContext.Use("Binary"))
+        {
+            var result = await _marketDataService.GetCandlesAsync(
+                symbol,
+                interval,
+                outputSize,
+                cancellationToken);
 
-        if (result is null)
-            return StatusCode(500, "Data gelmedi.");
+            if (result is null)
+                return StatusCode(500, "Data gelmedi.");
 
-        if (result.Status == "error")
-            return BadRequest(result);
+            if (result.Status == "error")
+                return BadRequest(result);
 
-        return Ok(result);
+            return Ok(result);
+        }
     }
 
     [HttpGet("signal")]
@@ -60,64 +63,73 @@ public class MarketController : ControllerBase
         [FromQuery] string symbol = "EUR/USD",
         CancellationToken cancellationToken = default)
     {
-        var signal = await _smartSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
+        using (MarketDataApiGroupContext.Use("Binary"))
+        {
+            var signal = await _smartSignalService.AnalyzeAsync(
+                symbol,
+                cancellationToken);
 
-        return Ok(signal);
+            return Ok(signal);
+        }
     }
 
     [HttpGet("status")]
     public async Task<IActionResult> GetStatus(
-    [FromQuery] string symbol = "EUR/USD",
-    CancellationToken cancellationToken = default)
+        [FromQuery] string symbol = "EUR/USD",
+        CancellationToken cancellationToken = default)
     {
-        var signal = await _smartSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
+        using (MarketDataApiGroupContext.Use("Binary"))
+        {
+            var signal = await _smartSignalService.AnalyzeAsync(
+                symbol,
+                cancellationToken);
 
-        var message = SignalMessageFormatter.Format(signal);
+            var message = SignalMessageFormatter.Format(signal);
 
-        return Content(message, "text/plain; charset=utf-8");
+            return Content(message, "text/plain; charset=utf-8");
+        }
     }
 
     [HttpGet("notify")]
     public async Task<IActionResult> NotifySignal(
-     [FromQuery] string symbol = "EUR/USD",
-     CancellationToken cancellationToken = default)
+        [FromQuery] string symbol = "EUR/USD",
+        CancellationToken cancellationToken = default)
     {
-        var signal = await _smartSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
-
-        var result = await _signalNotificationService.NotifyIfValidSignalAsync(
-            signal,
-            cancellationToken);
-
-        _dailyStatsService.RecordCheck(
-              signal,
-              result.Sent,
-              result.Message);
-
-        return Ok(new
+        using (MarketDataApiGroupContext.Use("Binary"))
         {
-            sent = result.Sent,
-            notificationMessage = result.Message,
+            var signal = await _smartSignalService.AnalyzeAsync(
+                symbol,
+                cancellationToken);
 
-            symbol = signal.Symbol,
-            direction = signal.Direction,
-            expiryMinutes = signal.ExpiryMinutes,
-            expiryReason = signal.ExpiryReason,
-            confidence = signal.Confidence,
-            grade = signal.Grade,
-            signalMessage = signal.Message,
-            reasons = signal.Reasons
-        });
+            var result = await _signalNotificationService.NotifyIfValidSignalAsync(
+                signal,
+                cancellationToken);
+
+            _dailyStatsService.RecordCheck(
+                signal,
+                result.Sent,
+                result.Message);
+
+            return Ok(new
+            {
+                sent = result.Sent,
+                notificationMessage = result.Message,
+
+                symbol = signal.Symbol,
+                direction = signal.Direction,
+                expiryMinutes = signal.ExpiryMinutes,
+                expiryReason = signal.ExpiryReason,
+                confidence = signal.Confidence,
+                grade = signal.Grade,
+                signalMessage = signal.Message,
+                reasons = signal.Reasons
+            });
+        }
     }
 
     [HttpGet("test-telegram")]
     public async Task<IActionResult> TestTelegram(
-    CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default)
     {
         var message =
             "✅ PocketSignal Telegram test mesajı uğurla göndərildi.\n\n" +
@@ -161,10 +173,17 @@ public class MarketController : ControllerBase
     }
 
     [HttpGet("signal-results-status")]
-    public IActionResult GetSignalResultsStatus()
+    public async Task<IActionResult> GetSignalResultsStatus(
+        CancellationToken cancellationToken = default)
     {
-        var message = _signalResultTracker.GetTodayStatus();
+        using (MarketDataApiGroupContext.Use("Binary"))
+        {
+            await _signalResultTracker.EvaluateDueSignalsAsync(
+                cancellationToken);
 
-        return Content(message, "text/plain; charset=utf-8");
+            var message = _signalResultTracker.GetTodayStatus();
+
+            return Content(message, "text/plain; charset=utf-8");
+        }
     }
 }

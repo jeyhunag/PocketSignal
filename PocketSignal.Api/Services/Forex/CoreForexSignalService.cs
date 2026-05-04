@@ -10,6 +10,7 @@ namespace PocketSignal.Api.Services.Forex;
 public class CoreForexSignalService : IForexSignalService
 {
     private const int MinimumConfidence = 72;
+    private const int DirectionConflictDistance = 10;
 
     private readonly IMarketDataService _marketDataService;
 
@@ -25,19 +26,19 @@ public class CoreForexSignalService : IForexSignalService
         var m15Response = await _marketDataService.GetCandlesAsync(
             symbol,
             "15min",
-            200,
+            220,
             cancellationToken);
 
         var m1Response = await _marketDataService.GetCandlesAsync(
             symbol,
             "1min",
-            300,
+            320,
             cancellationToken);
 
         var m15 = MapCandles(m15Response);
         var m1 = MapCandles(m1Response);
 
-        if (m15.Count < 60 || m1.Count < 80)
+        if (m15.Count < 70 || m1.Count < 100)
         {
             return Wait(
                 symbol,
@@ -45,66 +46,68 @@ public class CoreForexSignalService : IForexSignalService
                 "NO_TRADE",
                 new List<string>
                 {
-                    "Unicorn model ucun kifayet qeder M15/M1 candle yoxdur."
+                    "Strategy 2 ucun kifayet qeder M15/M1 candle yoxdur."
                 },
                 new List<ForexStrategyResult>());
         }
 
         var m15Trend = DetectTrend(m15);
 
-        var longCandidate = FindUnicornCandidate(
+        var longAnalysis = AnalyzeDirection(
             symbol,
             "LONG",
             m15,
             m1,
             m15Trend);
 
-        var shortCandidate = FindUnicornCandidate(
+        var shortAnalysis = AnalyzeDirection(
             symbol,
             "SHORT",
             m15,
             m1,
             m15Trend);
 
-        var candidates = new List<UnicornCandidate>();
+        Console.WriteLine(
+            $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] Forex Strategy2 | {symbol} | " +
+            $"M15 Trend: {m15Trend} | " +
+            $"LONG {longAnalysis.Confidence}% [{longAnalysis.DebugSummary}] | " +
+            $"SHORT {shortAnalysis.Confidence}% [{shortAnalysis.DebugSummary}]");
 
-        if (longCandidate != null)
-            candidates.Add(longCandidate);
+        var best = longAnalysis.Confidence >= shortAnalysis.Confidence
+            ? longAnalysis
+            : shortAnalysis;
 
-        if (shortCandidate != null)
-            candidates.Add(shortCandidate);
+        var opposite = best.Direction == "LONG"
+            ? shortAnalysis
+            : longAnalysis;
 
-        if (candidates.Count == 0)
+        var strategyResults = BuildStrategyResults(
+            longAnalysis,
+            shortAnalysis,
+            m15Trend);
+
+        if (!best.TradeReady)
         {
-            var strategyResults = BuildEmptyStrategyResults(m15Trend);
-
             return Wait(
                 symbol,
-                0,
-                "NO_TRADE",
+                best.Confidence,
+                best.Confidence >= MinimumConfidence ? "WATCHLIST" : "NO_TRADE",
                 new List<string>
                 {
                     $"M15 trend: {m15Trend}",
-                    "Fresh FVG + Breaker Block overlap tapilmadi.",
-                    "Unicorn model setup yoxdur."
-                },
+                    $"Setup hele tam hazir deyil. Best: {best.Direction} {best.Confidence}%.",
+                    $"LONG score: {longAnalysis.Confidence}%",
+                    $"SHORT score: {shortAnalysis.Confidence}%"
+                }
+                .Concat(best.Reasons)
+                .Distinct()
+                .ToList(),
                 strategyResults);
         }
 
-        var best = candidates
-            .OrderByDescending(x => x.Confidence)
-            .First();
-
-        var opposite = candidates
-            .Where(x => x.Direction != best.Direction)
-            .OrderByDescending(x => x.Confidence)
-            .FirstOrDefault();
-
-        if (opposite != null &&
-            Math.Abs(best.Confidence - opposite.Confidence) < 8)
+        if (opposite.TradeReady &&
+            Math.Abs(best.Confidence - opposite.Confidence) < DirectionConflictDistance)
         {
-            var results = BuildStrategyResults(best, opposite, m15Trend);
-
             return Wait(
                 symbol,
                 Math.Max(best.Confidence, opposite.Confidence),
@@ -112,113 +115,51 @@ public class CoreForexSignalService : IForexSignalService
                 new List<string>
                 {
                     $"M15 trend: {m15Trend}",
-                    $"LONG score: {(longCandidate?.Confidence ?? 0)}",
-                    $"SHORT score: {(shortCandidate?.Confidence ?? 0)}",
-                    "LONG ve SHORT unicorn setup-lari arasinda ferq azdir. Direction temiz deyil."
+                    $"LONG score: {longAnalysis.Confidence}%",
+                    $"SHORT score: {shortAnalysis.Confidence}%",
+                    "LONG ve SHORT Strategy 2 setup-lari arasinda ferq azdir. Direction temiz deyil."
                 },
-                results);
-        }
-
-        if (!best.IsPriceInEntryZone)
-        {
-            var results = BuildStrategyResults(best, opposite, m15Trend);
-
-            return Wait(
-                symbol,
-                best.Confidence,
-                "WATCHLIST",
-                new List<string>
-                {
-                    $"M15 trend: {m15Trend}",
-                    $"{best.Direction} unicorn zone tapildi, amma price hele entry zone-a qayitmayib.",
-                    $"Zone: {FormatPrice(best.ZoneLow)} - {FormatPrice(best.ZoneHigh)}"
-                },
-                results);
-        }
-
-        if (!best.HasEntryConfirmation)
-        {
-            var results = BuildStrategyResults(best, opposite, m15Trend);
-
-            return Wait(
-                symbol,
-                best.Confidence,
-                "WATCHLIST",
-                new List<string>
-                {
-                    $"M15 trend: {m15Trend}",
-                    $"{best.Direction} unicorn zone retest oldu, amma M1 rejection/confirmation yoxdur.",
-                    "Transcript qaydasina gore boyuk zone-larda confirmation gozlemek lazimdir."
-                },
-                results);
-        }
-
-        if (!best.IsFreshFvg)
-        {
-            var results = BuildStrategyResults(best, opposite, m15Trend);
-
-            return Wait(
-                symbol,
-                best.Confidence,
-                "NO_TRADE",
-                new List<string>
-                {
-                    $"{best.Direction} setup bloklandi: FVG fresh deyil / artiq mitigated olub.",
-                    "Transcript qaydasi: FVG bir defe test olunandan sonra gelecek trade ucun istifade olunmur."
-                },
-                results);
-        }
-
-        if (!best.IsRiskPlanValid)
-        {
-            var results = BuildStrategyResults(best, opposite, m15Trend);
-
-            return Wait(
-                symbol,
-                best.Confidence,
-                "NO_TRADE",
-                new List<string>
-                {
-                    $"{best.Direction} setup tapildi, amma risk plan uygun deyil.",
-                    best.InvalidReason
-                },
-                results);
+                strategyResults);
         }
 
         if (best.Confidence < MinimumConfidence)
         {
-            var results = BuildStrategyResults(best, opposite, m15Trend);
-
             return Wait(
                 symbol,
                 best.Confidence,
                 "WATCHLIST",
                 new List<string>
                 {
-                    $"{best.Direction} unicorn setup var, amma confidence minimum seviyeye catmadi.",
+                    $"M15 trend: {m15Trend}",
+                    $"{best.Direction} Strategy 2 setup var, amma confidence minimum seviyeye catmadi.",
                     $"Confidence: {best.Confidence}%, minimum: {MinimumConfidence}%"
-                },
-                results);
+                }
+                .Concat(best.Reasons)
+                .Distinct()
+                .ToList(),
+                strategyResults);
         }
-
-        var reasons = new List<string>
-        {
-            $"Unicorn model {best.Direction} signal tesdiqlendi.",
-            $"M15 trend: {m15Trend}",
-            "Breaker Block + fresh FVG overlap high-confluence zone yaratdi.",
-            "Price unicorn zone-a qayitdi.",
-            "M1 rejection/confirmation entry verdi.",
-            best.RiskReason
-        };
-
-        reasons.AddRange(best.Reasons);
-
-        var strategyResultsFinal = BuildStrategyResults(best, opposite, m15Trend);
 
         var entry = RoundPrice(symbol, best.EntryPrice);
         var stopLoss = RoundPrice(symbol, best.StopLoss);
         var takeProfit1 = RoundPrice(symbol, best.TakeProfit1);
         var takeProfit2 = RoundPrice(symbol, best.TakeProfit2);
+
+        var reasons = new List<string>
+        {
+            $"Strategy 2 {best.Direction} signal tesdiqlendi.",
+            $"M15 trend: {m15Trend}",
+            "M15 trend direction tapildi.",
+            "M15 FVG optimal trade zone kimi istifade edildi.",
+            "Price FVG zone-a pullback/retest etdi.",
+            "M1 liquidity grab entry reason verdi.",
+            best.HasChoch
+                ? "M1 CHoCH/BOS elave confirmation verdi."
+                : "M1 CHoCH/BOS yoxdur, liquidity grab esas entry confirmation kimi istifade edildi.",
+            best.RiskReason
+        };
+
+        reasons.AddRange(best.Reasons);
 
         return new ForexTradeSignal
         {
@@ -243,155 +184,721 @@ public class CoreForexSignalService : IForexSignalService
                 $"{symbol} {best.Direction} Entry: {entry} SL: {stopLoss} TP1: {takeProfit1} TP2: {takeProfit2}",
 
             InvalidIf = best.Direction == "LONG"
-                ? $"M1 candle {RoundPrice(symbol, best.ZoneLow)} altinda baglansa trade legvdir."
-                : $"M1 candle {RoundPrice(symbol, best.ZoneHigh)} ustunde baglansa trade legvdir.",
+                ? $"M1 candle {RoundPrice(symbol, best.InvalidLevel)} altinda baglansa trade legvdir."
+                : $"M1 candle {RoundPrice(symbol, best.InvalidLevel)} ustunde baglansa trade legvdir.",
 
             ValidForMinutes = GetValidForMinutes(best.Confidence),
+
             Reasons = reasons.Distinct().ToList(),
+
             SideAnalyses = new List<SideAnalysis>
             {
                 new SideAnalysis
                 {
-                    Direction = best.Direction,
-                    Score = best.Confidence,
-                    Reasons = best.Reasons
+                    Direction = "LONG",
+                    Score = longAnalysis.Confidence,
+                    Reasons = longAnalysis.Reasons
+                },
+                new SideAnalysis
+                {
+                    Direction = "SHORT",
+                    Score = shortAnalysis.Confidence,
+                    Reasons = shortAnalysis.Reasons
                 }
             },
-            StrategyResults = strategyResultsFinal,
+
+            StrategyResults = strategyResults,
             CreatedAtUtc = DateTime.UtcNow
         };
     }
 
-    private static UnicornCandidate? FindUnicornCandidate(
+    private static DirectionAnalysis AnalyzeDirection(
         string symbol,
         string direction,
         List<PriceCandle> m15,
         List<PriceCandle> m1,
         string m15Trend)
     {
-        var fvgZones = DetectFreshFvgs(m15, direction);
-
-        if (fvgZones.Count == 0)
-            return null;
-
-        var candidates = new List<UnicornCandidate>();
-
-        foreach (var fvg in fvgZones)
-        {
-            var breaker = FindBreakerBlockForFvg(m15, direction, fvg);
-
-            if (breaker == null)
-                continue;
-
-            var overlapLow = Math.Max(fvg.Low, breaker.Low);
-            var overlapHigh = Math.Min(fvg.High, breaker.High);
-
-            if (overlapLow >= overlapHigh)
-                continue;
-
-            var candidate = BuildCandidate(
-                symbol,
-                direction,
-                m15,
-                m1,
-                m15Trend,
-                fvg,
-                breaker,
-                overlapLow,
-                overlapHigh);
-
-            candidates.Add(candidate);
-        }
-
-        return candidates
-            .OrderByDescending(x => x.Confidence)
-            .FirstOrDefault();
-    }
-
-    private static UnicornCandidate BuildCandidate(
-        string symbol,
-        string direction,
-        List<PriceCandle> m15,
-        List<PriceCandle> m1,
-        string m15Trend,
-        Zone fvg,
-        Zone breaker,
-        double zoneLow,
-        double zoneHigh)
-    {
         var lastM1 = m1[^1];
-        var entryDouble = lastM1.Close;
+        var avgM15Range = AverageRange(m15.TakeLast(40).ToList());
+        var avgM1Range = AverageRange(m1.TakeLast(40).ToList());
 
-        var avgM1Range = AverageRange(m1.TakeLast(30).ToList());
-        var tolerance = avgM1Range * 1.2;
+        var analysis = new DirectionAnalysis
+        {
+            Direction = direction,
+            EntryPrice = (decimal)lastM1.Close
+        };
 
-        var priceTouchedZone = direction == "LONG"
-            ? lastM1.Low <= zoneHigh + tolerance && lastM1.Close >= zoneLow - tolerance
-            : lastM1.High >= zoneLow - tolerance && lastM1.Close <= zoneHigh + tolerance;
-
-        var priceInsideZone =
-            entryDouble >= zoneLow - tolerance &&
-            entryDouble <= zoneHigh + tolerance;
-
-        var rejection = direction == "LONG"
-            ? HasBullishRejectionFromZone(m1, zoneLow, zoneHigh, avgM1Range)
-            : HasBearishRejectionFromZone(m1, zoneLow, zoneHigh, avgM1Range);
-
-        var confidence = 0;
         var reasons = new List<string>();
 
-        confidence += 25;
-        reasons.Add("Fresh FVG tapildi.");
-
-        confidence += 25;
-        reasons.Add("Breaker Block FVG ile overlap edir.");
-
-        if (priceTouchedZone || priceInsideZone)
+        if (avgM15Range <= 0 || avgM1Range <= 0)
         {
-            confidence += 20;
-            reasons.Add("Price unicorn zone-a qayidib/retest edib.");
+            analysis.Reasons.Add("Average range hesablanmadi, candle data duzgun deyil.");
+            return analysis;
         }
 
-        if (rejection)
-        {
-            confidence += 20;
-            reasons.Add("M1 rejection/confirmation var.");
-        }
+        var trendAligned = IsTrendContextAligned(direction, m15Trend);
 
-        if (IsTrendContextAligned(direction, m15Trend))
+        if (trendAligned)
         {
-            confidence += 10;
-            reasons.Add("M15 trend direction ile uygundur.");
+            analysis.Confidence += 20;
+            analysis.IsTrendAligned = true;
+            reasons.Add($"M15 trend {direction} istiqametindedir.");
         }
         else if (m15Trend == "RANGE")
         {
-            confidence += 5;
-            reasons.Add("M15 range-dir, zone reaction daha vacibdir.");
+            analysis.Confidence += 6;
+            reasons.Add("M15 trend RANGE-dir. Strategy 2 ucun direction tam guclu deyil.");
         }
         else
         {
-            confidence -= 8;
-            reasons.Add("M15 trend direction ile tam uygun deyil.");
+            reasons.Add($"M15 trend {direction} ucun uygun deyil. Trend: {m15Trend}.");
         }
 
-        var stopBuffer = avgM1Range * 0.8;
+        var fvgZones = DetectActiveFvgs(
+            m15,
+            direction,
+            avgM15Range);
 
-        if (stopBuffer <= 0)
-            stopBuffer = entryDouble * 0.0005;
+        if (fvgZones.Count == 0)
+        {
+            reasons.Add(direction == "LONG"
+                ? "M15 bullish FVG optimal trade zone tapilmadi."
+                : "M15 bearish FVG optimal trade zone tapilmadi.");
 
-        var entry = (decimal)entryDouble;
-        var zoneLowDecimal = (decimal)zoneLow;
-        var zoneHighDecimal = (decimal)zoneHigh;
-        var buffer = (decimal)stopBuffer;
+            analysis.Reasons = reasons;
+            analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
+
+            return analysis;
+        }
+
+        var fvg = fvgZones
+            .OrderByDescending(x => ScoreZoneNearPrice(lastM1.Close, x, avgM1Range))
+            .ThenByDescending(x => x.Score)
+            .ThenBy(x => x.AgeCandles)
+            .First();
+
+        analysis.HasFvg = true;
+        analysis.ZoneLow = fvg.Low;
+        analysis.ZoneHigh = fvg.High;
+
+        analysis.Confidence += fvg.Score;
+
+        reasons.Add(direction == "LONG"
+            ? $"M15 bullish FVG zone tapildi: {FormatPrice(fvg.Low)} - {FormatPrice(fvg.High)}."
+            : $"M15 bearish FVG zone tapildi: {FormatPrice(fvg.Low)} - {FormatPrice(fvg.High)}.");
+
+        var retest = FindRecentZoneRetest(
+            m1,
+            fvg,
+            avgM1Range);
+
+        if (retest == null)
+        {
+            reasons.Add("Price hele M15 FVG zone-a pullback/retest etmeyib.");
+
+            analysis.Reasons = reasons;
+            analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
+
+            return analysis;
+        }
+
+        analysis.HasZoneRetest = true;
+        analysis.Confidence += retest.Score;
+
+        reasons.Add($"Price M15 FVG zone-a retest etdi. Retest age: {retest.AgeCandles} M1 candle.");
+
+        var liquidityGrab = FindLiquidityGrabInsideZone(
+            m1,
+            direction,
+            fvg,
+            avgM1Range);
+
+        if (liquidityGrab == null)
+        {
+            reasons.Add(direction == "LONG"
+                ? "M1 bullish liquidity grab FVG daxilinde hele yoxdur."
+                : "M1 bearish liquidity grab FVG daxilinde hele yoxdur.");
+
+            analysis.Reasons = reasons;
+            analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
+
+            return analysis;
+        }
+
+        analysis.HasLiquidityGrab = true;
+        analysis.Confidence += liquidityGrab.Score;
+
+        reasons.Add(direction == "LONG"
+            ? $"M1 bullish liquidity grab tapildi. Level: {FormatPrice(liquidityGrab.Level)}, age: {liquidityGrab.AgeCandles} candle."
+            : $"M1 bearish liquidity grab tapildi. Level: {FormatPrice(liquidityGrab.Level)}, age: {liquidityGrab.AgeCandles} candle.");
+
+        var choch = HasChochAfterGrab(
+            m1,
+            direction,
+            liquidityGrab.CandleIndex);
+
+        if (choch)
+        {
+            analysis.HasChoch = true;
+            analysis.Confidence += 10;
+            reasons.Add("Liquidity grab-dan sonra M1 CHoCH/BOS confirmation var.");
+        }
+        else
+        {
+            reasons.Add("Liquidity grab-dan sonra M1 CHoCH/BOS confirmation hele yoxdur.");
+        }
+
+        var entryConfirmation = HasEntryConfirmation(
+            m1,
+            direction,
+            fvg,
+            avgM1Range);
+
+        if (entryConfirmation.IsConfirmed)
+        {
+            analysis.HasEntryConfirmation = true;
+            analysis.Confidence += 6;
+            reasons.Add(entryConfirmation.Reason);
+        }
+        else
+        {
+            reasons.Add(entryConfirmation.Reason);
+        }
+
+        var entryStillValid = IsEntryStillNearZone(
+            lastM1.Close,
+            fvg,
+            avgM1Range);
+
+        if (entryStillValid)
+        {
+            analysis.IsEntryStillValid = true;
+            analysis.Confidence += 5;
+            reasons.Add("Entry gecikmis deyil, price hele FVG zone/retest zonasina yaxindir.");
+        }
+        else
+        {
+            reasons.Add("Entry gecikmis ola biler, price FVG zone-dan uzaqlasib.");
+        }
+
+        var riskPlan = BuildRiskPlan(
+            symbol,
+            direction,
+            lastM1,
+            fvg,
+            liquidityGrab,
+            avgM1Range);
+
+        analysis.EntryPrice = riskPlan.Entry;
+        analysis.StopLoss = riskPlan.StopLoss;
+        analysis.TakeProfit1 = riskPlan.TakeProfit1;
+        analysis.TakeProfit2 = riskPlan.TakeProfit2;
+        analysis.RiskPips = riskPlan.RiskPips;
+        analysis.RewardPips1 = riskPlan.RewardPips1;
+        analysis.RewardPips2 = riskPlan.RewardPips2;
+        analysis.RiskReward1 = riskPlan.RiskReward1;
+        analysis.RiskReward2 = riskPlan.RiskReward2;
+        analysis.InvalidLevel = riskPlan.InvalidLevel;
+        analysis.IsRiskPlanValid = riskPlan.IsValid;
+        analysis.InvalidReason = riskPlan.InvalidReason;
+        analysis.RiskReason = riskPlan.Reason;
+
+        if (riskPlan.IsValid)
+        {
+            analysis.Confidence += 5;
+            reasons.Add(riskPlan.Reason);
+        }
+        else
+        {
+            reasons.Add(riskPlan.InvalidReason);
+        }
+
+        if (liquidityGrab.AgeCandles > 30)
+        {
+            analysis.Confidence -= 8;
+            reasons.Add("Liquidity grab artiq bir az kohneleib.");
+        }
+
+        analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
+
+        analysis.TradeReady =
+            analysis.IsTrendAligned &&
+            analysis.HasFvg &&
+            analysis.HasZoneRetest &&
+            analysis.HasLiquidityGrab &&
+            analysis.IsEntryStillValid &&
+            analysis.IsRiskPlanValid &&
+            liquidityGrab.AgeCandles <= 35;
+
+        if (!analysis.TradeReady)
+        {
+            if (!analysis.IsTrendAligned)
+                reasons.Add("No trade: M15 trend direction ile uygun deyil.");
+
+            if (!analysis.IsEntryStillValid)
+                reasons.Add("No trade: entry gecikib.");
+
+            if (!analysis.IsRiskPlanValid)
+                reasons.Add("No trade: risk plan uygun deyil.");
+
+            if (liquidityGrab.AgeCandles > 35)
+                reasons.Add("No trade: liquidity grab cox kohneleib.");
+        }
+
+        analysis.Reasons = reasons.Distinct().ToList();
+
+        return analysis;
+    }
+
+    private static List<FvgZone> DetectActiveFvgs(
+        List<PriceCandle> candles,
+        string direction,
+        double avgRange)
+    {
+        var zones = new List<FvgZone>();
+
+        var start = Math.Max(2, candles.Count - 140);
+
+        for (var i = start; i < candles.Count - 1; i++)
+        {
+            var c1 = candles[i - 2];
+            var c2 = candles[i - 1];
+            var c3 = candles[i];
+
+            if (direction == "LONG")
+            {
+                var hasBullishFvg = c1.High < c3.Low;
+
+                if (!hasBullishFvg)
+                    continue;
+
+                var low = c1.High;
+                var high = c3.Low;
+                var size = high - low;
+
+                if (size <= 0 || size < avgRange * 0.05)
+                    continue;
+
+                var isUsable = !IsFvgFullyInvalidated(
+                    candles,
+                    i,
+                    low,
+                    high,
+                    direction);
+
+                if (!isUsable)
+                    continue;
+
+                var impulse =
+                    c2.IsBullish ||
+                    c3.IsBullish ||
+                    c3.Close > c1.Close;
+
+                zones.Add(new FvgZone
+                {
+                    Direction = direction,
+                    Low = low,
+                    High = high,
+                    CreatedIndex = i,
+                    CreatedAtUtc = c3.TimeUtc,
+                    AgeCandles = candles.Count - 1 - i,
+                    Score = CalculateFvgScore(i, candles.Count, size, avgRange, impulse)
+                });
+            }
+            else
+            {
+                var hasBearishFvg = c1.Low > c3.High;
+
+                if (!hasBearishFvg)
+                    continue;
+
+                var low = c3.High;
+                var high = c1.Low;
+                var size = high - low;
+
+                if (size <= 0 || size < avgRange * 0.05)
+                    continue;
+
+                var isUsable = !IsFvgFullyInvalidated(
+                    candles,
+                    i,
+                    low,
+                    high,
+                    direction);
+
+                if (!isUsable)
+                    continue;
+
+                var impulse =
+                    c2.IsBearish ||
+                    c3.IsBearish ||
+                    c3.Close < c1.Close;
+
+                zones.Add(new FvgZone
+                {
+                    Direction = direction,
+                    Low = low,
+                    High = high,
+                    CreatedIndex = i,
+                    CreatedAtUtc = c3.TimeUtc,
+                    AgeCandles = candles.Count - 1 - i,
+                    Score = CalculateFvgScore(i, candles.Count, size, avgRange, impulse)
+                });
+            }
+        }
+
+        return zones
+            .OrderByDescending(x => x.Score)
+            .ThenBy(x => x.AgeCandles)
+            .Take(12)
+            .ToList();
+    }
+
+    private static bool IsFvgFullyInvalidated(
+        List<PriceCandle> candles,
+        int createdIndex,
+        double low,
+        double high,
+        string direction)
+    {
+        for (var i = createdIndex + 1; i < candles.Count; i++)
+        {
+            var candle = candles[i];
+
+            if (direction == "LONG")
+            {
+                if (candle.Low <= low)
+                    return true;
+            }
+            else
+            {
+                if (candle.High >= high)
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static int CalculateFvgScore(
+        int createdIndex,
+        int candleCount,
+        double size,
+        double avgRange,
+        bool impulse)
+    {
+        var age = candleCount - 1 - createdIndex;
+
+        var score = 18;
+
+        if (age <= 12)
+            score += 6;
+        else if (age <= 30)
+            score += 4;
+        else if (age <= 60)
+            score += 2;
+
+        if (size <= avgRange * 2.5)
+            score += 4;
+
+        if (impulse)
+            score += 4;
+
+        return Math.Clamp(score, 12, 30);
+    }
+
+    private static int ScoreZoneNearPrice(
+        double price,
+        FvgZone zone,
+        double avgM1Range)
+    {
+        var distance = DistanceFromZone(price, zone);
+
+        if (distance <= 0)
+            return 30;
+
+        if (distance <= avgM1Range * 3)
+            return 24;
+
+        if (distance <= avgM1Range * 8)
+            return 16;
+
+        if (distance <= avgM1Range * 15)
+            return 8;
+
+        return 0;
+    }
+
+    private static RetestInfo? FindRecentZoneRetest(
+        List<PriceCandle> m1,
+        FvgZone zone,
+        double avgRange)
+    {
+        var tolerance = Math.Max(
+            avgRange * 0.35,
+            Math.Max(zone.Low, zone.High) * 0.00003);
+
+        var start = Math.Max(0, m1.Count - 80);
+
+        for (var i = m1.Count - 1; i >= start; i--)
+        {
+            var candle = m1[i];
+
+            if (!OverlapsZone(candle, zone, tolerance))
+                continue;
+
+            var age = m1.Count - 1 - i;
+
+            var score = age switch
+            {
+                <= 5 => 20,
+                <= 15 => 17,
+                <= 30 => 13,
+                <= 50 => 9,
+                _ => 6
+            };
+
+            return new RetestInfo
+            {
+                CandleIndex = i,
+                AgeCandles = age,
+                Score = score
+            };
+        }
+
+        return null;
+    }
+
+    private static LiquidityGrabInfo? FindLiquidityGrabInsideZone(
+        List<PriceCandle> m1,
+        string direction,
+        FvgZone zone,
+        double avgRange)
+    {
+        var tolerance = Math.Max(
+            avgRange * 0.35,
+            Math.Max(zone.Low, zone.High) * 0.00003);
+
+        var start = Math.Max(30, m1.Count - 90);
+
+        for (var i = m1.Count - 1; i >= start; i--)
+        {
+            var candle = m1[i];
+
+            if (!OverlapsZone(candle, zone, tolerance))
+                continue;
+
+            var referenceStart = Math.Max(0, i - 28);
+            var reference = m1
+                .Skip(referenceStart)
+                .Take(i - referenceStart)
+                .ToList();
+
+            if (reference.Count < 10)
+                continue;
+
+            if (direction == "LONG")
+            {
+                var keyLow = reference.Min(x => x.Low);
+
+                var sweptLow = candle.Low < keyLow;
+                var closedBackInside = candle.Close > keyLow;
+
+                if (!sweptLow || !closedBackInside)
+                    continue;
+
+                var wickBonus = candle.LowerWick >= Math.Max(candle.Body * 0.8, avgRange * 0.2)
+                    ? 5
+                    : 0;
+
+                var age = m1.Count - 1 - i;
+
+                var score =
+                    17 +
+                    wickBonus +
+                    GetRecencyScore(age);
+
+                return new LiquidityGrabInfo
+                {
+                    Candle = candle,
+                    CandleIndex = i,
+                    Level = keyLow,
+                    AgeCandles = age,
+                    Score = Math.Clamp(score, 14, 28)
+                };
+            }
+            else
+            {
+                var keyHigh = reference.Max(x => x.High);
+
+                var sweptHigh = candle.High > keyHigh;
+                var closedBackInside = candle.Close < keyHigh;
+
+                if (!sweptHigh || !closedBackInside)
+                    continue;
+
+                var wickBonus = candle.UpperWick >= Math.Max(candle.Body * 0.8, avgRange * 0.2)
+                    ? 5
+                    : 0;
+
+                var age = m1.Count - 1 - i;
+
+                var score =
+                    17 +
+                    wickBonus +
+                    GetRecencyScore(age);
+
+                return new LiquidityGrabInfo
+                {
+                    Candle = candle,
+                    CandleIndex = i,
+                    Level = keyHigh,
+                    AgeCandles = age,
+                    Score = Math.Clamp(score, 14, 28)
+                };
+            }
+        }
+
+        return null;
+    }
+
+    private static int GetRecencyScore(int ageCandles)
+    {
+        if (ageCandles <= 5)
+            return 6;
+
+        if (ageCandles <= 15)
+            return 4;
+
+        if (ageCandles <= 30)
+            return 2;
+
+        return 0;
+    }
+
+    private static bool HasChochAfterGrab(
+        List<PriceCandle> m1,
+        string direction,
+        int grabIndex)
+    {
+        var referenceStart = Math.Max(0, grabIndex - 16);
+
+        var reference = m1
+            .Skip(referenceStart)
+            .Take(grabIndex - referenceStart)
+            .ToList();
+
+        if (reference.Count < 6)
+            return false;
+
+        if (direction == "LONG")
+        {
+            var lastSwingHigh = reference.Max(x => x.High);
+
+            for (var i = grabIndex + 1; i < m1.Count; i++)
+            {
+                if (m1[i].Close > lastSwingHigh)
+                    return true;
+            }
+
+            return false;
+        }
+
+        var lastSwingLow = reference.Min(x => x.Low);
+
+        for (var i = grabIndex + 1; i < m1.Count; i++)
+        {
+            if (m1[i].Close < lastSwingLow)
+                return true;
+        }
+
+        return false;
+    }
+
+    private static (bool IsConfirmed, string Reason) HasEntryConfirmation(
+        List<PriceCandle> m1,
+        string direction,
+        FvgZone zone,
+        double avgRange)
+    {
+        var recent = m1.TakeLast(6).ToList();
+
+        foreach (var candle in recent)
+        {
+            if (!OverlapsZone(candle, zone, avgRange * 0.5))
+                continue;
+
+            if (candle.Range <= 0)
+                continue;
+
+            var closePosition = (candle.Close - candle.Low) / candle.Range;
+
+            if (direction == "LONG")
+            {
+                var bullishRejection =
+                    candle.IsBullish &&
+                    candle.LowerWick >= candle.Body * 0.70 &&
+                    closePosition >= 0.55;
+
+                var strongBullishClose =
+                    candle.IsBullish &&
+                    closePosition >= 0.65 &&
+                    candle.Range >= avgRange * 0.55;
+
+                if (bullishRejection || strongBullishClose)
+                    return (true, "M1 bullish rejection/confirmation FVG daxilinde var.");
+            }
+            else
+            {
+                var bearishRejection =
+                    candle.IsBearish &&
+                    candle.UpperWick >= candle.Body * 0.70 &&
+                    closePosition <= 0.45;
+
+                var strongBearishClose =
+                    candle.IsBearish &&
+                    closePosition <= 0.35 &&
+                    candle.Range >= avgRange * 0.55;
+
+                if (bearishRejection || strongBearishClose)
+                    return (true, "M1 bearish rejection/confirmation FVG daxilinde var.");
+            }
+        }
+
+        return direction == "LONG"
+            ? (false, "M1 bullish rejection/confirmation hele yoxdur.")
+            : (false, "M1 bearish rejection/confirmation hele yoxdur.");
+    }
+
+    private static RiskPlan BuildRiskPlan(
+        string symbol,
+        string direction,
+        PriceCandle lastM1,
+        FvgZone zone,
+        LiquidityGrabInfo grab,
+        double avgM1Range)
+    {
+        var entry = (decimal)lastM1.Close;
+
+        var bufferDouble = Math.Max(
+            avgM1Range * 1.2,
+            lastM1.Close * 0.00005);
+
+        var buffer = (decimal)bufferDouble;
 
         decimal stopLoss;
         decimal takeProfit1;
         decimal takeProfit2;
         decimal risk;
+        decimal invalidLevel;
 
         if (direction == "LONG")
         {
-            stopLoss = zoneLowDecimal - buffer;
+            var stopBase = Math.Min(grab.Candle.Low, zone.Low);
+
+            stopLoss = (decimal)stopBase - buffer;
+            invalidLevel = (decimal)stopBase;
 
             if (stopLoss >= entry)
                 stopLoss = entry - Math.Abs(buffer);
@@ -403,7 +910,10 @@ public class CoreForexSignalService : IForexSignalService
         }
         else
         {
-            stopLoss = zoneHighDecimal + buffer;
+            var stopBase = Math.Max(grab.Candle.High, zone.High);
+
+            stopLoss = (decimal)stopBase + buffer;
+            invalidLevel = (decimal)stopBase;
 
             if (stopLoss <= entry)
                 stopLoss = entry + Math.Abs(buffer);
@@ -420,40 +930,32 @@ public class CoreForexSignalService : IForexSignalService
         var rewardPips1 = Math.Abs(takeProfit1 - entry) / pipSize;
         var rewardPips2 = Math.Abs(takeProfit2 - entry) / pipSize;
 
-        var riskReward1 = riskPips > 0 ? rewardPips1 / riskPips : 0;
-        var riskReward2 = riskPips > 0 ? rewardPips2 / riskPips : 0;
+        var riskReward1 = riskPips > 0
+            ? rewardPips1 / riskPips
+            : 0;
 
-        var isRiskValid =
+        var riskReward2 = riskPips > 0
+            ? rewardPips2 / riskPips
+            : 0;
+
+        var isValid =
             risk > 0 &&
-            riskPips >= 5 &&
-            riskReward1 >= 1.5m &&
-            riskReward2 >= 2.2m;
+            riskPips >= 3m &&
+            riskPips <= 150m &&
+            riskReward1 >= 1.8m &&
+            riskReward2 >= 2.7m;
 
         var invalidReason = string.Empty;
 
-        if (!isRiskValid)
+        if (!isValid)
         {
             invalidReason =
                 $"Risk plan uygun deyil. RiskPips: {Math.Round(riskPips, 1)}, RR1: {Math.Round(riskReward1, 2)}, RR2: {Math.Round(riskReward2, 2)}";
         }
 
-        if (riskPips > 100)
+        return new RiskPlan
         {
-            confidence -= 10;
-            invalidReason = $"Risk mesafesi cox boyukdur: {Math.Round(riskPips, 1)} pips.";
-            isRiskValid = false;
-        }
-
-        confidence = Math.Clamp(confidence, 0, 100);
-
-        return new UnicornCandidate
-        {
-            Direction = direction,
-            Fvg = fvg,
-            Breaker = breaker,
-            ZoneLow = zoneLow,
-            ZoneHigh = zoneHigh,
-            EntryPrice = entry,
+            Entry = entry,
             StopLoss = stopLoss,
             TakeProfit1 = takeProfit1,
             TakeProfit2 = takeProfit2,
@@ -462,225 +964,174 @@ public class CoreForexSignalService : IForexSignalService
             RewardPips2 = rewardPips2,
             RiskReward1 = riskReward1,
             RiskReward2 = riskReward2,
-            Confidence = confidence,
-            IsFreshFvg = fvg.IsFresh,
-            IsPriceInEntryZone = priceTouchedZone || priceInsideZone,
-            HasEntryConfirmation = rejection,
-            IsRiskPlanValid = isRiskValid,
+            InvalidLevel = invalidLevel,
+            IsValid = isValid,
             InvalidReason = invalidReason,
-            RiskReason = "SL unicorn zone arxasinda, TP1 1:2, TP2 1:3 hesablandi.",
-            Reasons = reasons
+            Reason = "SL liquidity grab arxasinda, TP1 1:2, TP2 1:3 hesablandi."
         };
     }
 
-    private static List<Zone> DetectFreshFvgs(
-        List<PriceCandle> candles,
-        string direction)
-    {
-        var zones = new List<Zone>();
-
-        for (var i = 2; i < candles.Count - 1; i++)
-        {
-            var c1 = candles[i - 2];
-            var c3 = candles[i];
-
-            if (direction == "LONG")
-            {
-                if (c1.High < c3.Low && c3.Close > c3.Open)
-                {
-                    var zone = new Zone
-                    {
-                        Type = "BULLISH_FVG",
-                        Direction = "LONG",
-                        Low = c1.High,
-                        High = c3.Low,
-                        CreatedIndex = i,
-                        IsFresh = IsFvgFresh(candles, i, c1.High, c3.Low)
-                    };
-
-                    if (zone.IsFresh)
-                        zones.Add(zone);
-                }
-            }
-
-            if (direction == "SHORT")
-            {
-                if (c1.Low > c3.High && c3.Close < c3.Open)
-                {
-                    var zone = new Zone
-                    {
-                        Type = "BEARISH_FVG",
-                        Direction = "SHORT",
-                        Low = c3.High,
-                        High = c1.Low,
-                        CreatedIndex = i,
-                        IsFresh = IsFvgFresh(candles, i, c3.High, c1.Low)
-                    };
-
-                    if (zone.IsFresh)
-                        zones.Add(zone);
-                }
-            }
-        }
-
-        return zones
-            .OrderByDescending(x => x.CreatedIndex)
-            .Take(10)
-            .ToList();
-    }
-
-    private static bool IsFvgFresh(
-        List<PriceCandle> candles,
-        int createdIndex,
-        double low,
-        double high)
-    {
-        for (var i = createdIndex + 1; i < candles.Count - 1; i++)
-        {
-            var candle = candles[i];
-
-            var touched =
-                candle.Low <= high &&
-                candle.High >= low;
-
-            if (touched)
-                return false;
-        }
-
-        return true;
-    }
-
-    private static Zone? FindBreakerBlockForFvg(
-        List<PriceCandle> candles,
-        string direction,
-        Zone fvg)
-    {
-        var start = Math.Max(0, fvg.CreatedIndex - 12);
-
-        if (direction == "LONG")
-        {
-            for (var i = fvg.CreatedIndex - 1; i >= start; i--)
-            {
-                var c = candles[i];
-
-                if (!c.IsBearish)
-                    continue;
-
-                var brokenAbove = candles
-                    .Skip(i + 1)
-                    .Take(fvg.CreatedIndex - i)
-                    .Any(x => x.Close > c.High);
-
-                if (!brokenAbove)
-                    continue;
-
-                return new Zone
-                {
-                    Type = "BULLISH_BREAKER",
-                    Direction = "LONG",
-                    Low = c.Low,
-                    High = c.High,
-                    CreatedIndex = i,
-                    IsFresh = true
-                };
-            }
-        }
-
-        if (direction == "SHORT")
-        {
-            for (var i = fvg.CreatedIndex - 1; i >= start; i--)
-            {
-                var c = candles[i];
-
-                if (!c.IsBullish)
-                    continue;
-
-                var brokenBelow = candles
-                    .Skip(i + 1)
-                    .Take(fvg.CreatedIndex - i)
-                    .Any(x => x.Close < c.Low);
-
-                if (!brokenBelow)
-                    continue;
-
-                return new Zone
-                {
-                    Type = "BEARISH_BREAKER",
-                    Direction = "SHORT",
-                    Low = c.Low,
-                    High = c.High,
-                    CreatedIndex = i,
-                    IsFresh = true
-                };
-            }
-        }
-
-        return null;
-    }
-
-    private static bool HasBullishRejectionFromZone(
-        List<PriceCandle> m1,
-        double zoneLow,
-        double zoneHigh,
+    private static bool IsEntryStillNearZone(
+        double price,
+        FvgZone zone,
         double avgRange)
     {
-        var recent = m1.TakeLast(4).ToList();
+        var distance = DistanceFromZone(price, zone);
 
-        foreach (var candle in recent)
-        {
-            var touchedZone = candle.Low <= zoneHigh && candle.High >= zoneLow;
-            var bullish = candle.Close > candle.Open;
-            var lowerRejection = candle.LowerWick >= candle.Body * 1.2;
-            var strongClose = candle.Close >= candle.Low + candle.Range * 0.62;
+        if (distance <= 0)
+            return true;
 
-            if (touchedZone && bullish && (lowerRejection || strongClose) && candle.Range >= avgRange * 0.5)
-                return true;
-        }
-
-        return false;
+        return distance <= avgRange * 3.5;
     }
 
-    private static bool HasBearishRejectionFromZone(
-        List<PriceCandle> m1,
-        double zoneLow,
-        double zoneHigh,
-        double avgRange)
+    private static bool OverlapsZone(
+        PriceCandle candle,
+        FvgZone zone,
+        double tolerance)
     {
-        var recent = m1.TakeLast(4).ToList();
+        return candle.Low <= zone.High + tolerance &&
+               candle.High >= zone.Low - tolerance;
+    }
 
-        foreach (var candle in recent)
-        {
-            var touchedZone = candle.Low <= zoneHigh && candle.High >= zoneLow;
-            var bearish = candle.Close < candle.Open;
-            var upperRejection = candle.UpperWick >= candle.Body * 1.2;
-            var strongClose = candle.Close <= candle.Low + candle.Range * 0.38;
+    private static double DistanceFromZone(
+        double price,
+        FvgZone zone)
+    {
+        if (price >= zone.Low && price <= zone.High)
+            return 0;
 
-            if (touchedZone && bearish && (upperRejection || strongClose) && candle.Range >= avgRange * 0.5)
-                return true;
-        }
+        if (price < zone.Low)
+            return zone.Low - price;
 
-        return false;
+        return price - zone.High;
     }
 
     private static string DetectTrend(List<PriceCandle> candles)
     {
-        var recent = candles.TakeLast(24).ToList();
+        var recent = candles.TakeLast(80).ToList();
 
-        var firstClose = recent.First().Close;
-        var lastClose = recent.Last().Close;
+        if (recent.Count < 30)
+            return "RANGE";
 
-        var fast = recent.TakeLast(6).Average(x => x.Close);
-        var slow = recent.TakeLast(18).Average(x => x.Close);
+        var swings = FindSwings(
+            recent,
+            2,
+            2);
 
-        var avgRange = AverageRange(recent);
+        var highs = swings
+            .Where(x => x.Kind == "HIGH")
+            .OrderBy(x => x.Index)
+            .TakeLast(2)
+            .ToList();
 
-        if (lastClose > firstClose + avgRange && fast > slow)
+        var lows = swings
+            .Where(x => x.Kind == "LOW")
+            .OrderBy(x => x.Index)
+            .TakeLast(2)
+            .ToList();
+
+        if (highs.Count >= 2 && lows.Count >= 2)
+        {
+            var higherHigh = highs[1].Price > highs[0].Price;
+            var higherLow = lows[1].Price > lows[0].Price;
+
+            var lowerHigh = highs[1].Price < highs[0].Price;
+            var lowerLow = lows[1].Price < lows[0].Price;
+
+            if (higherHigh && higherLow)
+                return "BULLISH";
+
+            if (lowerHigh && lowerLow)
+                return "BEARISH";
+        }
+
+        var lastClose = recent[^1].Close;
+        var firstClose = recent[0].Close;
+
+        var fast = recent.TakeLast(8).Average(x => x.Close);
+        var slow = recent.TakeLast(24).Average(x => x.Close);
+
+        var avgRange = AverageRange(recent.TakeLast(30).ToList());
+
+        if (lastClose > firstClose + avgRange * 1.2 && fast > slow)
             return "BULLISH";
 
-        if (lastClose < firstClose - avgRange && fast < slow)
+        if (lastClose < firstClose - avgRange * 1.2 && fast < slow)
+            return "BEARISH";
+
+        var beforeLast = recent.Take(recent.Count - 1).ToList();
+        var previousSwings = FindSwings(beforeLast, 2, 2);
+
+        var previousHigh = previousSwings
+            .Where(x => x.Kind == "HIGH")
+            .OrderBy(x => x.Index)
+            .LastOrDefault();
+
+        var previousLow = previousSwings
+            .Where(x => x.Kind == "LOW")
+            .OrderBy(x => x.Index)
+            .LastOrDefault();
+
+        if (previousHigh != null && lastClose > previousHigh.Price)
+            return "BULLISH";
+
+        if (previousLow != null && lastClose < previousLow.Price)
             return "BEARISH";
 
         return "RANGE";
+    }
+
+    private static List<SwingPoint> FindSwings(
+        List<PriceCandle> candles,
+        int left,
+        int right)
+    {
+        var swings = new List<SwingPoint>();
+
+        if (candles.Count < left + right + 1)
+            return swings;
+
+        for (var i = left; i < candles.Count - right; i++)
+        {
+            var isHigh = true;
+            var isLow = true;
+
+            for (var j = i - left; j <= i + right; j++)
+            {
+                if (j == i)
+                    continue;
+
+                if (candles[i].High <= candles[j].High)
+                    isHigh = false;
+
+                if (candles[i].Low >= candles[j].Low)
+                    isLow = false;
+            }
+
+            if (isHigh)
+            {
+                swings.Add(new SwingPoint
+                {
+                    Index = i,
+                    TimeUtc = candles[i].TimeUtc,
+                    Price = candles[i].High,
+                    Kind = "HIGH"
+                });
+            }
+
+            if (isLow)
+            {
+                swings.Add(new SwingPoint
+                {
+                    Index = i,
+                    TimeUtc = candles[i].TimeUtc,
+                    Price = candles[i].Low,
+                    Kind = "LOW"
+                });
+            }
+        }
+
+        return swings;
     }
 
     private static bool IsTrendContextAligned(
@@ -697,75 +1148,37 @@ public class CoreForexSignalService : IForexSignalService
     }
 
     private static List<ForexStrategyResult> BuildStrategyResults(
-        UnicornCandidate best,
-        UnicornCandidate? opposite,
-        string m15Trend)
-    {
-        var results = new List<ForexStrategyResult>
-        {
-            new ForexStrategyResult
-            {
-                StrategyName = "UnicornModel",
-                Direction = best.Direction,
-                Score = best.Confidence,
-                MaxScore = 100,
-                IsConfirmed = best.Confidence >= MinimumConfidence,
-                Reasons = best.Reasons
-            },
-            new ForexStrategyResult
-            {
-                StrategyName = "M15Context",
-                Direction = best.Direction,
-                Score = IsTrendContextAligned(best.Direction, m15Trend) ? 20 : 8,
-                MaxScore = 20,
-                IsConfirmed = IsTrendContextAligned(best.Direction, m15Trend),
-                Reasons = new List<string>
-                {
-                    $"M15 trend: {m15Trend}"
-                }
-            }
-        };
-
-        if (opposite != null)
-        {
-            results.Add(new ForexStrategyResult
-            {
-                StrategyName = "OppositeUnicornModel",
-                Direction = opposite.Direction,
-                Score = opposite.Confidence,
-                MaxScore = 100,
-                IsConfirmed = opposite.Confidence >= MinimumConfidence,
-                Reasons = opposite.Reasons
-            });
-        }
-
-        return results;
-    }
-
-    private static List<ForexStrategyResult> BuildEmptyStrategyResults(
+        DirectionAnalysis longAnalysis,
+        DirectionAnalysis shortAnalysis,
         string m15Trend)
     {
         return new List<ForexStrategyResult>
         {
             new ForexStrategyResult
             {
-                StrategyName = "UnicornModel",
-                Direction = "WAIT",
-                Score = 0,
+                StrategyName = "Strategy2_TrendFvgLiquidityGrab",
+                Direction = "LONG",
+                Score = longAnalysis.Confidence,
                 MaxScore = 100,
-                IsConfirmed = false,
-                Reasons = new List<string>
-                {
-                    "Unicorn setup yoxdur."
-                }
+                IsConfirmed = longAnalysis.TradeReady && longAnalysis.Confidence >= MinimumConfidence,
+                Reasons = longAnalysis.Reasons
             },
             new ForexStrategyResult
             {
-                StrategyName = "M15Context",
-                Direction = "WAIT",
-                Score = 0,
+                StrategyName = "Strategy2_TrendFvgLiquidityGrab",
+                Direction = "SHORT",
+                Score = shortAnalysis.Confidence,
+                MaxScore = 100,
+                IsConfirmed = shortAnalysis.TradeReady && shortAnalysis.Confidence >= MinimumConfidence,
+                Reasons = shortAnalysis.Reasons
+            },
+            new ForexStrategyResult
+            {
+                StrategyName = "M15TrendContext",
+                Direction = m15Trend,
+                Score = m15Trend == "RANGE" ? 6 : 20,
                 MaxScore = 20,
-                IsConfirmed = false,
+                IsConfirmed = m15Trend != "RANGE",
                 Reasons = new List<string>
                 {
                     $"M15 trend: {m15Trend}"
@@ -787,7 +1200,7 @@ public class CoreForexSignalService : IForexSignalService
             Direction = "WAIT",
             Confidence = Math.Clamp(confidence, 0, 100),
             Grade = grade,
-            Message = $"{symbol} FOREX WAIT",
+            Message = $"{symbol} FOREX WAIT {Math.Clamp(confidence, 0, 100)}%",
             Reasons = reasons.Distinct().ToList(),
             StrategyResults = strategyResults,
             CreatedAtUtc = DateTime.UtcNow
@@ -927,23 +1340,29 @@ public class CoreForexSignalService : IForexSignalService
         return candles.Average(x => x.Range);
     }
 
-    private sealed class Zone
+    private sealed class DirectionAnalysis
     {
-        public string Type { get; set; } = "";
-        public string Direction { get; set; } = "";
-        public double Low { get; set; }
-        public double High { get; set; }
-        public int CreatedIndex { get; set; }
-        public bool IsFresh { get; set; }
-    }
+        public string Direction { get; set; } = string.Empty;
 
-    private sealed class UnicornCandidate
-    {
-        public string Direction { get; set; } = "";
+        public int Confidence { get; set; }
 
-        public Zone Fvg { get; set; } = new();
+        public bool TradeReady { get; set; }
 
-        public Zone Breaker { get; set; } = new();
+        public bool IsTrendAligned { get; set; }
+
+        public bool HasFvg { get; set; }
+
+        public bool HasZoneRetest { get; set; }
+
+        public bool HasLiquidityGrab { get; set; }
+
+        public bool HasChoch { get; set; }
+
+        public bool HasEntryConfirmation { get; set; }
+
+        public bool IsEntryStillValid { get; set; }
+
+        public bool IsRiskPlanValid { get; set; }
 
         public double ZoneLow { get; set; }
 
@@ -967,20 +1386,94 @@ public class CoreForexSignalService : IForexSignalService
 
         public decimal RiskReward2 { get; set; }
 
-        public int Confidence { get; set; }
+        public decimal InvalidLevel { get; set; }
 
-        public bool IsFreshFvg { get; set; }
+        public string InvalidReason { get; set; } = string.Empty;
 
-        public bool IsPriceInEntryZone { get; set; }
-
-        public bool HasEntryConfirmation { get; set; }
-
-        public bool IsRiskPlanValid { get; set; }
-
-        public string InvalidReason { get; set; } = "";
-
-        public string RiskReason { get; set; } = "";
+        public string RiskReason { get; set; } = string.Empty;
 
         public List<string> Reasons { get; set; } = new();
+
+        public string DebugSummary =>
+            $"Trend={IsTrendAligned}, FVG={HasFvg}, Retest={HasZoneRetest}, Grab={HasLiquidityGrab}, CHoCH={HasChoch}, Confirm={HasEntryConfirmation}, EntryValid={IsEntryStillValid}, Risk={IsRiskPlanValid}, Ready={TradeReady}";
+    }
+
+    private sealed class FvgZone
+    {
+        public string Direction { get; set; } = string.Empty;
+
+        public double Low { get; set; }
+
+        public double High { get; set; }
+
+        public int CreatedIndex { get; set; }
+
+        public DateTime CreatedAtUtc { get; set; }
+
+        public int AgeCandles { get; set; }
+
+        public int Score { get; set; }
+    }
+
+    private sealed class LiquidityGrabInfo
+    {
+        public PriceCandle Candle { get; set; } = new();
+
+        public int CandleIndex { get; set; }
+
+        public double Level { get; set; }
+
+        public int AgeCandles { get; set; }
+
+        public int Score { get; set; }
+    }
+
+    private sealed class RetestInfo
+    {
+        public int CandleIndex { get; set; }
+
+        public int AgeCandles { get; set; }
+
+        public int Score { get; set; }
+    }
+
+    private sealed class RiskPlan
+    {
+        public decimal Entry { get; set; }
+
+        public decimal StopLoss { get; set; }
+
+        public decimal TakeProfit1 { get; set; }
+
+        public decimal TakeProfit2 { get; set; }
+
+        public decimal RiskPips { get; set; }
+
+        public decimal RewardPips1 { get; set; }
+
+        public decimal RewardPips2 { get; set; }
+
+        public decimal RiskReward1 { get; set; }
+
+        public decimal RiskReward2 { get; set; }
+
+        public decimal InvalidLevel { get; set; }
+
+        public bool IsValid { get; set; }
+
+        public string InvalidReason { get; set; } = string.Empty;
+
+        public string Reason { get; set; } = string.Empty;
+    }
+
+    private sealed class SwingPoint
+    {
+        public int Index { get; set; }
+
+        public DateTime TimeUtc { get; set; }
+
+        public double Price { get; set; }
+
+        public string Kind { get; set; } = string.Empty;
     }
 }

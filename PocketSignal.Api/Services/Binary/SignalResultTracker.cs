@@ -15,6 +15,9 @@ public class SignalResultTracker : ISignalResultTracker
     private readonly ITelegramService _telegramService;
     private readonly ILogger<SignalResultTracker> _logger;
 
+    private DateTime _summaryDateUtc = DateTime.UtcNow.Date;
+    private int _lastSummarySentCompletedCount;
+
     public SignalResultTracker(
         IMarketDataService marketDataService,
         ITelegramService telegramService,
@@ -260,6 +263,118 @@ public class SignalResultTracker : ISignalResultTracker
 
             throw;
         }
+
+        await TrySendDailySummaryIfNeededAsync(cancellationToken);
+    }
+
+    private async Task TrySendDailySummaryIfNeededAsync(
+        CancellationToken cancellationToken)
+    {
+        string? summaryMessage = null;
+        int completedToMark = 0;
+
+        lock (_lock)
+        {
+            ResetSummaryMarkerIfNewDay();
+
+            var today = DateTime.UtcNow.Date;
+
+            var todayTrades = _trades
+                .Where(x => x.CreatedAtUtc.Date == today)
+                .ToList();
+
+            var pending = todayTrades.Count(x => x.Result == "PENDING");
+            var wins = todayTrades.Count(x => x.Result == "WIN");
+            var losses = todayTrades.Count(x => x.Result == "LOSS");
+            var draws = todayTrades.Count(x => x.Result == "DRAW");
+
+            var completed = wins + losses + draws;
+
+            if (completed < 10)
+                return;
+
+            if (completed % 10 != 0)
+                return;
+
+            if (_lastSummarySentCompletedCount == completed)
+                return;
+
+            _lastSummarySentCompletedCount = completed;
+            completedToMark = completed;
+
+            summaryMessage = FormatDailySummaryMessage(
+                completed,
+                pending,
+                wins,
+                losses,
+                draws);
+        }
+
+        if (string.IsNullOrWhiteSpace(summaryMessage))
+            return;
+
+        try
+        {
+            await _telegramService.SendMessageAsync(
+                summaryMessage,
+                cancellationToken);
+
+            _logger.LogInformation(
+                "Binary daily summary Telegram-a gonderildi. Completed: {Completed}",
+                completedToMark);
+        }
+        catch (Exception ex)
+        {
+            lock (_lock)
+            {
+                if (_lastSummarySentCompletedCount == completedToMark)
+                    _lastSummarySentCompletedCount = Math.Max(0, completedToMark - 1);
+            }
+
+            _logger.LogWarning(
+                ex,
+                "Binary daily summary Telegram-a gonderilmedi. Completed: {Completed}",
+                completedToMark);
+        }
+    }
+
+    private void ResetSummaryMarkerIfNewDay()
+    {
+        var today = DateTime.UtcNow.Date;
+
+        if (_summaryDateUtc == today)
+            return;
+
+        _summaryDateUtc = today;
+        _lastSummarySentCompletedCount = 0;
+    }
+
+    private static string FormatDailySummaryMessage(
+        int completed,
+        int pending,
+        int wins,
+        int losses,
+        int draws)
+    {
+        var winLossTotal = wins + losses;
+
+        var winRate = winLossTotal > 0
+            ? Math.Round((decimal)wins / winLossTotal * 100m, 1)
+            : 0;
+
+        return
+$"""
+📊 Binary Daily Summary
+
+Completed: {completed}
+✅ Win: {wins}
+❌ Lose: {losses}
+➖ Draw: {draws}
+⏳ Pending: {pending}
+
+Win rate: {winRate}%
+Date UTC: {DateTime.UtcNow:yyyy-MM-dd}
+""";
     }
 
     private async Task<decimal?> GetLatestCloseAsync(
