@@ -147,36 +147,64 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
 
     private static void Normalize(AdminRuntimeSettings settings)
     {
-        if (settings.BinarySymbols.Count == 0)
-        {
-            settings.BinarySymbols = new List<string>
-            {
-                "EUR/USD",
-                "GBP/USD",
-                "USD/JPY",
-                "EUR/GBP",
-                "GBP/JPY",
-                "AUD/USD",
-                "USD/CAD",
-                "EUR/JPY"
-            };
-        }
+        var defaultBinarySymbols = new List<string>
+    {
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "EUR/GBP",
+        "GBP/JPY",
+        "AUD/USD",
+        "USD/CAD",
+        "EUR/JPY",
 
-        if (settings.ForexSymbols.Count == 0)
-        {
-            settings.ForexSymbols = new List<string>
-            {
-                "GBP/JPY",
-                "EUR/USD",
-                "USD/JPY",
-                "EUR/GBP",
-                "GBP/USD",
-                "BTC/USD",
-                "ETH/USD",
-                "XAU/USD",
-                "USOIL"
-            };
-        }
+        "AUD/JPY",
+        "EUR/CAD",
+        "CAD/CHF",
+        "USD/CHF",
+        "CHF/JPY",
+        "AUD/CHF",
+        "GBP/AUD",
+        "EUR/AUD",
+        "CAD/JPY",
+        "AUD/CAD"
+    };
+
+        var defaultForexSymbols = new List<string>
+    {
+        "GBP/JPY",
+        "EUR/USD",
+        "USD/JPY",
+        "EUR/GBP",
+        "GBP/USD",
+        "AUD/USD",
+        "USD/CAD",
+        "EUR/JPY",
+
+        "AUD/JPY",
+        "EUR/CAD",
+        "CAD/CHF",
+        "USD/CHF",
+        "CHF/JPY",
+        "AUD/CHF",
+        "GBP/AUD",
+        "EUR/AUD",
+        "CAD/JPY",
+        "AUD/CAD",
+
+        "BTC/USD",
+        "ETH/USD",
+        "XAU/USD",
+        "USOIL"
+    };
+
+        settings.BinarySymbols = MergeSymbols(
+            settings.BinarySymbols,
+            defaultBinarySymbols);
+
+        settings.ForexSymbols = MergeSymbols(
+            settings.ForexSymbols,
+            defaultForexSymbols);
 
         if (!settings.BinarySymbols.Contains(settings.BinaryActiveSymbol))
             settings.BinaryActiveSymbol = settings.BinarySymbols.First();
@@ -196,6 +224,52 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             settings.Mt5MaxPendingMinutes = Clamp(settings.Mt5MaxPendingMinutes, 1, 1440);
 
         settings.Mt5MaxTradesPerDay = Clamp(settings.Mt5MaxTradesPerDay, 1, 100);
+    }
+
+    private static List<string> MergeSymbols(
+    List<string>? current,
+    List<string> defaults)
+    {
+        var result = new List<string>();
+
+        if (current != null)
+        {
+            foreach (var symbol in current)
+            {
+                var normalized = NormalizeSymbol(symbol);
+
+                if (string.IsNullOrWhiteSpace(normalized))
+                    continue;
+
+                if (!result.Contains(normalized))
+                    result.Add(normalized);
+            }
+        }
+
+        foreach (var symbol in defaults)
+        {
+            var normalized = NormalizeSymbol(symbol);
+
+            if (string.IsNullOrWhiteSpace(normalized))
+                continue;
+
+            if (!result.Contains(normalized))
+                result.Add(normalized);
+        }
+
+        return result;
+    }
+
+    private static string NormalizeSymbol(string symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+            return string.Empty;
+
+        return symbol
+            .Trim()
+            .Replace("-", "/")
+            .Replace(" ", "")
+            .ToUpperInvariant();
     }
 
     private static double ClampLotSize(double value)
