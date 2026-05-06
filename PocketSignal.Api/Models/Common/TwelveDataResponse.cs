@@ -18,6 +18,8 @@ public class TwelveDataResponse
 
     [JsonPropertyName("code")]
     public int? Code { get; set; }
+
+
 }
 
 public class TwelveDataMeta
@@ -58,4 +60,8 @@ public class CandleDto
     [JsonPropertyName("close")]
     [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
     public decimal Close { get; set; }
+
+    [JsonPropertyName("volume")]
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public decimal? Volume { get; set; }
 }

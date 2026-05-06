@@ -59,13 +59,17 @@ builder.Services.AddSingleton<ISignalResultTracker, SignalResultTracker>();
 builder.Services.AddSingleton<IDailyStatsService, DailyStatsService>();
 builder.Services.AddSingleton<IBinaryDailyResultSummaryService, BinaryDailyResultSummaryService>();
 
-
 // Forex services
-builder.Services.AddScoped<IForexSignalService, CoreForexSignalService>();
+builder.Services.AddScoped<CoreForexSignalService>();
+builder.Services.AddScoped<XauUsdScalpingSignalService>();
+builder.Services.AddScoped<IForexSignalService, ForexSignalRouterService>();
+
 builder.Services.AddScoped<IForexNotificationService, ForexNotificationService>();
 builder.Services.AddScoped<IForexSignalDatabaseService, ForexSignalDatabaseService>();
 builder.Services.AddScoped<IForexChartImageService, ForexChartImageService>();
 builder.Services.AddSingleton<IForexTradeResultTracker, ForexTradeResultTracker>();
+
+// MT5 AutoTrade
 builder.Services.AddSingleton<IMt5AutoTradeQueueService, Mt5AutoTradeQueueService>();
 
 // Telegram
@@ -91,7 +95,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-//app.UseHttpsRedirection();
+// app.UseHttpsRedirection();
 
 app.UseStaticFiles();
 

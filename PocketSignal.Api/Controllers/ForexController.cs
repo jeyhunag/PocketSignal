@@ -1,6 +1,7 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using PocketSignal.Api.Services;
 using PocketSignal.Api.Services.Forex;
+using PocketSignal.Api.Services.MarketData;
 
 namespace PocketSignal.Api.Controllers;
 
@@ -30,11 +31,14 @@ public class ForexController : ControllerBase
         [FromQuery] string symbol = "GBP/JPY",
         CancellationToken cancellationToken = default)
     {
-        var signal = await _forexSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
+        using (MarketDataApiGroupContext.Use("Forex"))
+        {
+            var signal = await _forexSignalService.AnalyzeAsync(
+                symbol,
+                cancellationToken);
 
-        return Ok(signal);
+            return Ok(signal);
+        }
     }
 
     [HttpGet("status")]
@@ -42,13 +46,16 @@ public class ForexController : ControllerBase
         [FromQuery] string symbol = "GBP/JPY",
         CancellationToken cancellationToken = default)
     {
-        var signal = await _forexSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
+        using (MarketDataApiGroupContext.Use("Forex"))
+        {
+            var signal = await _forexSignalService.AnalyzeAsync(
+                symbol,
+                cancellationToken);
 
-        var message = ForexMessageFormatter.Format(signal);
+            var message = ForexMessageFormatter.Format(signal);
 
-        return Content(message, "text/plain; charset=utf-8");
+            return Content(message, "text/plain; charset=utf-8");
+        }
     }
 
     [HttpGet("notify")]
@@ -56,45 +63,48 @@ public class ForexController : ControllerBase
         [FromQuery] string symbol = "GBP/JPY",
         CancellationToken cancellationToken = default)
     {
-        var signal = await _forexSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
-
-        var result = await _forexNotificationService.NotifyIfValidSignalAsync(
-            signal,
-            cancellationToken);
-
-        var savedSignalId = await _forexSignalDatabaseService.SaveSignalAsync(
-            signal,
-            result.Sent,
-            result.Message,
-            cancellationToken);
-
-        await _forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
-
-        return Ok(new
+        using (MarketDataApiGroupContext.Use("Forex"))
         {
-            sent = result.Sent,
-            notificationMessage = result.Message,
-            savedSignalId,
+            var signal = await _forexSignalService.AnalyzeAsync(
+                symbol,
+                cancellationToken);
 
-            symbol = signal.Symbol,
-            direction = signal.Direction,
-            entry = signal.EntryPrice,
-            stopLoss = signal.StopLoss,
-            takeProfit1 = signal.TakeProfit1,
-            takeProfit2 = signal.TakeProfit2,
-            riskPips = signal.RiskPips,
-            rewardPips1 = signal.RewardPips1,
-            rewardPips2 = signal.RewardPips2,
-            riskReward1 = signal.RiskReward1,
-            riskReward2 = signal.RiskReward2,
-            confidence = signal.Confidence,
-            grade = signal.Grade,
-            message = signal.Message,
-            reasons = signal.Reasons,
-            strategyResults = signal.StrategyResults
-        });
+            var result = await _forexNotificationService.NotifyIfValidSignalAsync(
+                signal,
+                cancellationToken);
+
+            var savedSignalId = await _forexSignalDatabaseService.SaveSignalAsync(
+                signal,
+                result.Sent,
+                result.Message,
+                cancellationToken);
+
+            await _forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
+
+            return Ok(new
+            {
+                sent = result.Sent,
+                notificationMessage = result.Message,
+                savedSignalId,
+
+                symbol = signal.Symbol,
+                direction = signal.Direction,
+                entry = signal.EntryPrice,
+                stopLoss = signal.StopLoss,
+                takeProfit1 = signal.TakeProfit1,
+                takeProfit2 = signal.TakeProfit2,
+                riskPips = signal.RiskPips,
+                rewardPips1 = signal.RewardPips1,
+                rewardPips2 = signal.RewardPips2,
+                riskReward1 = signal.RiskReward1,
+                riskReward2 = signal.RiskReward2,
+                confidence = signal.Confidence,
+                grade = signal.Grade,
+                message = signal.Message,
+                reasons = signal.Reasons,
+                strategyResults = signal.StrategyResults
+            });
+        }
     }
 
     [HttpGet("trade-results")]
