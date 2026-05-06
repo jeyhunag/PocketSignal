@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using PocketSignal.Api.Data;
 
@@ -11,9 +12,11 @@ using PocketSignal.Api.Data;
 namespace PocketSignal.Api.Migrations
 {
     [DbContext(typeof(PocketSignalDbContext))]
-    partial class PocketSignalDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260506222210_AddBinaryTradeResults")]
+    partial class AddBinaryTradeResults
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

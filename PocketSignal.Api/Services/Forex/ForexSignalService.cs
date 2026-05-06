@@ -3,7 +3,6 @@ using PocketSignal.Api.Models;
 using PocketSignal.Api.Models.Common;
 using PocketSignal.Api.Models.Forex;
 using PocketSignal.Api.Services.MarketData;
-using PocketSignal.Api.Services.Forex.Strategies;
 
 namespace PocketSignal.Api.Services.Forex;
 
@@ -21,9 +20,6 @@ public class ForexSignalService : IForexSignalService
     new SupportResistanceBounceStrategy(),
     new BreakoutRetestStrategy(),
 
-    new PatternBreakoutConfirmationStrategy(),
-    new FalseBreakoutTrapStrategy(),
-    new NarrowRangeInsideBarStrategy(),
 
     new ForexSessionFilterStrategy(),
     new VolatilityFilterStrategy(),

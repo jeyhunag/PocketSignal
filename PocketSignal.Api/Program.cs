@@ -11,6 +11,7 @@ using PocketSignal.Api.Services.Mt5;
 using PocketSignal.Api.Services.Stats;
 using PocketSignal.Api.Services.Telegram;
 using PocketSignal.Api.Services.Workers;
+using PocketSignal.Api.Services.Reports;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -79,6 +80,7 @@ builder.Services.AddHttpClient<ITelegramService, TelegramService>();
 builder.Services.AddHostedService<SignalWorker>();
 builder.Services.AddHostedService<ForexWorker>();
 builder.Services.AddHostedService<StartupNotificationWorker>();
+builder.Services.AddHostedService<DailyTradeReportWorker>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();

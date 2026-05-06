@@ -10,5 +10,7 @@ public interface ISignalResultTracker
 
     List<SignalTradeRecord> GetTodayTrades();
 
+    List<SignalTradeRecord> GetTradesByAzerbaijanDate(DateTime dateAz);
+
     string GetTodayStatus();
 }

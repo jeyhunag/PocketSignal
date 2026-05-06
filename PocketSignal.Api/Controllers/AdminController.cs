@@ -2,6 +2,9 @@
 using System.Net;
 using System.Text;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using PocketSignal.Api.Data;
+using PocketSignal.Api.Data.Entities;
 using PocketSignal.Api.Models.Admin;
 using PocketSignal.Api.Services.Admin;
 
@@ -13,13 +16,16 @@ public class AdminController : ControllerBase
 {
     private readonly IAdminRuntimeSettingsService _settingsService;
     private readonly IWebHostEnvironment _environment;
+    private readonly PocketSignalDbContext _dbContext;
 
     public AdminController(
         IAdminRuntimeSettingsService settingsService,
-        IWebHostEnvironment environment)
+        IWebHostEnvironment environment,
+        PocketSignalDbContext dbContext)
     {
         _settingsService = settingsService;
         _environment = environment;
+        _dbContext = dbContext;
     }
 
     [HttpGet]
@@ -53,6 +59,146 @@ public class AdminController : ControllerBase
             cancellationToken);
 
         return Ok(settings);
+    }
+
+    [HttpGet("reports")]
+    public async Task<IActionResult> GetReports(
+        [FromQuery] string? date,
+        CancellationToken cancellationToken)
+    {
+        var reportDateAz = ParseAzerbaijanDateOrToday(date);
+        var range = GetUtcRangeForAzerbaijanDate(reportDateAz);
+
+        var binaryTrades = await _dbContext.BinaryTradeResults
+            .AsNoTracking()
+            .Where(x =>
+                x.CreatedAtUtc >= range.StartUtc &&
+                x.CreatedAtUtc < range.EndUtc)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
+
+        var forexTrades = await _dbContext.ForexTradeResults
+            .AsNoTracking()
+            .Where(x =>
+                x.CreatedAtUtc >= range.StartUtc &&
+                x.CreatedAtUtc < range.EndUtc)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
+
+        return Ok(new
+        {
+            dateAz = reportDateAz.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            binary = BuildBinaryReport(binaryTrades),
+            forex = BuildForexReport(forexTrades)
+        });
+    }
+
+    [HttpPost("reports/binary/delete-day")]
+    public async Task<IActionResult> DeleteBinaryDay(
+        [FromBody] ReportDateRequest request,
+        CancellationToken cancellationToken)
+    {
+        var reportDateAz = ParseAzerbaijanDateOrToday(request.Date);
+        var range = GetUtcRangeForAzerbaijanDate(reportDateAz);
+
+        var trades = await _dbContext.BinaryTradeResults
+            .Where(x =>
+                x.CreatedAtUtc >= range.StartUtc &&
+                x.CreatedAtUtc < range.EndUtc)
+            .ToListAsync(cancellationToken);
+
+        _dbContext.BinaryTradeResults.RemoveRange(trades);
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            removed = trades.Count,
+            message = $"{trades.Count} Binary nəticə silindi."
+        });
+    }
+
+    [HttpPost("reports/forex/delete-day")]
+    public async Task<IActionResult> DeleteForexDay(
+        [FromBody] ReportDateRequest request,
+        CancellationToken cancellationToken)
+    {
+        var reportDateAz = ParseAzerbaijanDateOrToday(request.Date);
+        var range = GetUtcRangeForAzerbaijanDate(reportDateAz);
+
+        var signals = await _dbContext.ForexSignals
+            .Include(x => x.StrategyScores)
+            .Include(x => x.TradeResult)
+            .Where(x =>
+                x.CreatedAtUtc >= range.StartUtc &&
+                x.CreatedAtUtc < range.EndUtc)
+            .ToListAsync(cancellationToken);
+
+        _dbContext.ForexSignals.RemoveRange(signals);
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new
+        {
+            removed = signals.Count,
+            message = $"{signals.Count} Forex signal/nəticə silindi."
+        });
+    }
+
+    [HttpPost("reports/binary/delete/{id}")]
+    public async Task<IActionResult> DeleteBinaryTrade(
+        string id,
+        CancellationToken cancellationToken)
+    {
+        var trade = await _dbContext.BinaryTradeResults
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+
+        if (trade == null)
+            return NotFound(new { message = "Binary nəticə tapılmadı." });
+
+        _dbContext.BinaryTradeResults.Remove(trade);
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new { message = "Binary nəticə silindi." });
+    }
+
+    [HttpPost("reports/forex/delete/{id:guid}")]
+    public async Task<IActionResult> DeleteForexTrade(
+        Guid id,
+        CancellationToken cancellationToken)
+    {
+        var trade = await _dbContext.ForexTradeResults
+            .Include(x => x.ForexSignal)
+            .FirstOrDefaultAsync(x => x.Id == id, cancellationToken);
+
+        if (trade == null)
+            return NotFound(new { message = "Forex nəticə tapılmadı." });
+
+        if (trade.ForexSignal != null)
+        {
+            var signal = await _dbContext.ForexSignals
+                .Include(x => x.StrategyScores)
+                .Include(x => x.TradeResult)
+                .FirstOrDefaultAsync(x => x.Id == trade.ForexSignalId, cancellationToken);
+
+            if (signal != null)
+            {
+                _dbContext.ForexSignals.Remove(signal);
+            }
+            else
+            {
+                _dbContext.ForexTradeResults.Remove(trade);
+            }
+        }
+        else
+        {
+            _dbContext.ForexTradeResults.Remove(trade);
+        }
+
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        return Ok(new { message = "Forex nəticə silindi." });
     }
 
     [HttpGet("charts/binary")]
@@ -187,6 +333,11 @@ public class AdminController : ControllerBase
         var forexStatusUrl =
             $"/api/forex/status?symbol={WebUtility.UrlEncode(firstForexSymbol)}";
 
+        var todayAz = TimeZoneInfo.ConvertTimeFromUtc(
+                DateTime.UtcNow,
+                GetAzerbaijanTimeZone())
+            .ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
         var binaryChartCards = BuildChartCards(
             "binary-charts",
             "Hələ Binary chart yaradılmayıb.",
@@ -213,7 +364,7 @@ public class AdminController : ControllerBase
         }
 
         .container {
-            max-width: 1200px;
+            max-width: 1250px;
             margin: 0 auto;
         }
 
@@ -228,7 +379,7 @@ public class AdminController : ControllerBase
             gap: 20px;
         }
 
-        .card {
+        .card, .status, .chart-section, .report-section {
             background: #181f26;
             border: 1px solid #2b3540;
             border-radius: 16px;
@@ -236,7 +387,11 @@ public class AdminController : ControllerBase
             box-shadow: 0 8px 24px rgba(0,0,0,0.25);
         }
 
-        .card h2 {
+        .status, .chart-section, .report-section {
+            margin-top: 20px;
+        }
+
+        .card h2, .status h2, .chart-section h2, .report-section h2 {
             margin-top: 0;
             font-size: 22px;
         }
@@ -305,30 +460,13 @@ public class AdminController : ControllerBase
             font-size: 13px;
         }
 
-        .status {
-            margin-top: 20px;
-            background: #11171d;
-            border: 1px solid #2b3540;
-            border-radius: 16px;
-            padding: 18px;
-        }
-
-        .input-control {
+        .input-control, .select-control {
             padding: 10px;
             border-radius: 10px;
             border: 1px solid #2b3540;
             background: #11171d;
             color: white;
-            width: 130px;
-        }
-
-        .select-control {
-            padding: 10px;
-            border-radius: 10px;
-            border: 1px solid #2b3540;
-            background: #11171d;
-            color: white;
-            width: 130px;
+            width: 150px;
         }
 
         a {
@@ -359,12 +497,11 @@ public class AdminController : ControllerBase
             font-weight: bold;
         }
 
-        .chart-section {
-            margin-top: 20px;
-            background: #11171d;
-            border: 1px solid #2b3540;
-            border-radius: 16px;
-            padding: 18px;
+        .hint {
+            color: #a1a1aa;
+            font-size: 14px;
+            margin-top: -6px;
+            margin-bottom: 14px;
         }
 
         .chart-section-header {
@@ -376,10 +513,6 @@ public class AdminController : ControllerBase
             margin-bottom: 10px;
         }
 
-        .chart-section-header h2 {
-            margin: 0;
-        }
-
         .chart-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -387,7 +520,7 @@ public class AdminController : ControllerBase
         }
 
         .chart-card {
-            background: #181f26;
+            background: #11171d;
             border: 1px solid #2b3540;
             border-radius: 16px;
             padding: 10px;
@@ -424,11 +557,64 @@ public class AdminController : ControllerBase
             color: #a1a1aa;
         }
 
-        .hint {
+        .report-controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            margin-bottom: 18px;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+            gap: 12px;
+            margin-bottom: 18px;
+        }
+
+        .summary-card {
+            background: #11171d;
+            border: 1px solid #2b3540;
+            border-radius: 14px;
+            padding: 14px;
+        }
+
+        .summary-card .label {
             color: #a1a1aa;
-            font-size: 14px;
-            margin-top: -6px;
-            margin-bottom: 14px;
+            font-size: 13px;
+        }
+
+        .summary-card .value {
+            font-size: 24px;
+            font-weight: bold;
+            margin-top: 4px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 12px;
+            background: #11171d;
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        th, td {
+            border-bottom: 1px solid #2b3540;
+            padding: 10px;
+            text-align: left;
+            font-size: 13px;
+        }
+
+        th {
+            color: #d4d4d8;
+            background: #0f151b;
+        }
+
+        .section-title {
+            margin-top: 24px;
+            margin-bottom: 8px;
+            font-size: 19px;
         }
 
         @media (max-width: 850px) {
@@ -477,7 +663,7 @@ public class AdminController : ControllerBase
             </p>
 
             <div class="symbols">
-                {{forexCheckboxes}}
+                {{BuildCheckboxes("forexActiveSymbols", settings.ForexSymbols, settings.ForexActiveSymbols)}}
             </div>
         </div>
     </div>
@@ -645,6 +831,31 @@ public class AdminController : ControllerBase
         </p>
     </div>
 
+    <div class="report-section">
+        <h2>📅 Günlük nəticələr və statistika</h2>
+
+        <div class="report-controls">
+            <label>
+                Tarix:
+                <input type="date" id="reportDate" value="{{todayAz}}" class="input-control" />
+            </label>
+
+            <button onclick="loadReports()">Hesabatı göstər</button>
+
+            <button class="danger-button" onclick="deleteBinaryDay()">
+                Bu günün Binary nəticələrini sil
+            </button>
+
+            <button class="danger-button" onclick="deleteForexDay()">
+                Bu günün Forex nəticələrini sil
+            </button>
+        </div>
+
+        <div id="reportResult" class="muted">Hesabat yüklənir...</div>
+
+        <div id="reportsContainer"></div>
+    </div>
+
     <div class="chart-section">
         <div class="chart-section-header">
             <h2>Son Binary chart-lar</h2>
@@ -771,6 +982,270 @@ async function saveSettings() {
     resultElement.className = "success";
 }
 
+async function loadReports() {
+    const date = document.getElementById("reportDate").value;
+    const resultElement = document.getElementById("reportResult");
+    const container = document.getElementById("reportsContainer");
+
+    resultElement.innerText = "Yüklənir...";
+    resultElement.className = "muted";
+
+    const response = await fetch("/admin/reports?date=" + encodeURIComponent(date));
+
+    if (!response.ok) {
+        resultElement.innerText = "Hesabat yüklənmədi.";
+        resultElement.className = "danger";
+        return;
+    }
+
+    const data = await response.json();
+
+    container.innerHTML =
+        renderReportBlock("Binary", data.binary, "binary") +
+        renderReportBlock("Forex", data.forex, "forex");
+
+    resultElement.innerText = "Hesabat yükləndi: " + data.dateAz;
+    resultElement.className = "success";
+}
+
+function renderReportBlock(title, report, type) {
+    return `
+        <div class="section-title">${title} nəticələri</div>
+
+        <div class="summary-grid">
+            <div class="summary-card">
+                <div class="label">Cəmi</div>
+                <div class="value">${report.total}</div>
+            </div>
+
+            <div class="summary-card">
+                <div class="label">Win</div>
+                <div class="value">✅ ${report.wins}</div>
+            </div>
+
+            <div class="summary-card">
+                <div class="label">Lose</div>
+                <div class="value">❌ ${report.losses}</div>
+            </div>
+
+            <div class="summary-card">
+                <div class="label">Pending</div>
+                <div class="value">⏳ ${report.pending}</div>
+            </div>
+
+            <div class="summary-card">
+                <div class="label">Win rate</div>
+                <div class="value">${report.winRate}%</div>
+            </div>
+        </div>
+
+        <div class="grid">
+            <div>
+                <h3>Symbol üzrə nəticə</h3>
+                ${renderSymbolTable(report.bySymbol)}
+            </div>
+
+            <div>
+                <h3>Statistik nəticə</h3>
+                ${renderStats(report)}
+            </div>
+        </div>
+
+        <h3>Əməliyyatlar</h3>
+        ${renderTrades(report.trades, type)}
+    `;
+}
+
+function renderSymbolTable(items) {
+    if (!items || items.length === 0) {
+        return `<p class="muted">Nəticə yoxdur.</p>`;
+    }
+
+    let rows = "";
+
+    for (const item of items) {
+        const cls = item.winRate >= 60 ? "success" : item.winRate <= 40 ? "danger" : "warning";
+
+        rows += `
+            <tr>
+                <td>${escapeHtml(item.symbol)}</td>
+                <td>${item.total}</td>
+                <td>✅ ${item.wins}</td>
+                <td>❌ ${item.losses}</td>
+                <td>${item.pending}</td>
+                <td class="${cls}">${item.winRate}%</td>
+            </tr>
+        `;
+    }
+
+    return `
+        <table>
+            <thead>
+                <tr>
+                    <th>Symbol</th>
+                    <th>Total</th>
+                    <th>Win</th>
+                    <th>Lose</th>
+                    <th>Pending</th>
+                    <th>Win rate</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+}
+
+function renderStats(report) {
+    const best = report.bestSymbols || [];
+    const worst = report.worstSymbols || [];
+
+    return `
+        <table>
+            <thead>
+                <tr>
+                    <th>Tip</th>
+                    <th>Symbol</th>
+                    <th>Win rate</th>
+                    <th>Total</th>
+                </tr>
+            </thead>
+            <tbody>
+                ${best.map(x => `
+                    <tr>
+                        <td class="success">Yaxşı</td>
+                        <td>${escapeHtml(x.symbol)}</td>
+                        <td>${x.winRate}%</td>
+                        <td>${x.total}</td>
+                    </tr>
+                `).join("")}
+                ${worst.map(x => `
+                    <tr>
+                        <td class="danger">Pis</td>
+                        <td>${escapeHtml(x.symbol)}</td>
+                        <td>${x.winRate}%</td>
+                        <td>${x.total}</td>
+                    </tr>
+                `).join("")}
+            </tbody>
+        </table>
+    `;
+}
+
+function renderTrades(trades, type) {
+    if (!trades || trades.length === 0) {
+        return `<p class="muted">Bu tarixdə əməliyyat yoxdur.</p>`;
+    }
+
+    let rows = "";
+
+    for (const trade of trades) {
+        const resultClass =
+            trade.result === "WIN" || trade.result === "WIN_TP2"
+                ? "success"
+                : trade.result === "LOSS"
+                    ? "danger"
+                    : "warning";
+
+        rows += `
+            <tr>
+                <td>${escapeHtml(trade.createdAtAz)}</td>
+                <td>${escapeHtml(trade.symbol)}</td>
+                <td>${escapeHtml(trade.direction)}</td>
+                <td class="${resultClass}">${escapeHtml(trade.result)}</td>
+                <td>${trade.confidence ?? ""}</td>
+                <td>${trade.entryPrice}</td>
+                <td>${trade.exitPrice ?? "-"}</td>
+                <td>
+                    <button class="danger-button small-button" onclick="deleteTrade('${type}', '${trade.id}')">
+                        Sil
+                    </button>
+                </td>
+            </tr>
+        `;
+    }
+
+    return `
+        <table>
+            <thead>
+                <tr>
+                    <th>Vaxt AZT</th>
+                    <th>Symbol</th>
+                    <th>Direction</th>
+                    <th>Result</th>
+                    <th>Conf.</th>
+                    <th>Entry</th>
+                    <th>Exit</th>
+                    <th>Sil</th>
+                </tr>
+            </thead>
+            <tbody>${rows}</tbody>
+        </table>
+    `;
+}
+
+async function deleteTrade(type, id) {
+    if (!confirm("Bu nəticə silinsin?")) {
+        return;
+    }
+
+    const response = await fetch(`/admin/reports/${type}/delete/${id}`, {
+        method: "POST"
+    });
+
+    if (!response.ok) {
+        alert("Silinmədi.");
+        return;
+    }
+
+    await loadReports();
+}
+
+async function deleteBinaryDay() {
+    const date = document.getElementById("reportDate").value;
+
+    if (!confirm(date + " tarixinin bütün Binary nəticələri silinsin?")) {
+        return;
+    }
+
+    const response = await fetch("/admin/reports/binary/delete-day", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ date })
+    });
+
+    if (!response.ok) {
+        alert("Binary nəticələr silinmədi.");
+        return;
+    }
+
+    await loadReports();
+}
+
+async function deleteForexDay() {
+    const date = document.getElementById("reportDate").value;
+
+    if (!confirm(date + " tarixinin bütün Forex nəticələri silinsin?")) {
+        return;
+    }
+
+    const response = await fetch("/admin/reports/forex/delete-day", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ date })
+    });
+
+    if (!response.ok) {
+        alert("Forex nəticələr silinmədi.");
+        return;
+    }
+
+    await loadReports();
+}
+
 async function deleteChart(button) {
     const folderName = button.dataset.folder;
     const fileName = button.dataset.file;
@@ -824,10 +1299,202 @@ async function clearCharts(folderName) {
 
     location.reload();
 }
+
+function escapeHtml(value) {
+    if (value === null || value === undefined) {
+        return "";
+    }
+
+    return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+}
+
+loadReports();
 </script>
 </body>
 </html>
 """;
+    }
+
+    private static object BuildBinaryReport(List<BinaryTradeResultEntity> trades)
+    {
+        var total = trades.Count;
+        var wins = trades.Count(x => x.Result == "WIN");
+        var losses = trades.Count(x => x.Result == "LOSS");
+        var draws = trades.Count(x => x.Result == "DRAW");
+        var pending = trades.Count(x => x.Result == "PENDING");
+
+        var completed = wins + losses;
+
+        var winRate = completed > 0
+            ? Math.Round((decimal)wins / completed * 100m, 1)
+            : 0;
+
+        var bySymbol = BuildBinarySymbolStats(trades);
+
+        return new
+        {
+            total,
+            wins,
+            losses,
+            draws,
+            pending,
+            winRate,
+            bySymbol,
+            bestSymbols = bySymbol
+                .Where(x => x.Total >= 2)
+                .OrderByDescending(x => x.WinRate)
+                .ThenByDescending(x => x.Total)
+                .Take(5)
+                .ToList(),
+            worstSymbols = bySymbol
+                .Where(x => x.Total >= 2)
+                .OrderBy(x => x.WinRate)
+                .ThenByDescending(x => x.Total)
+                .Take(5)
+                .ToList(),
+            trades = trades.Select(x => new
+            {
+                id = x.Id,
+                createdAtAz = ToAzerbaijanTime(x.CreatedAtUtc).ToString("HH:mm:ss"),
+                x.Symbol,
+                x.Direction,
+                x.Result,
+                x.Confidence,
+                x.EntryPrice,
+                x.ExitPrice
+            }).ToList()
+        };
+    }
+
+    private static object BuildForexReport(List<ForexTradeResultEntity> trades)
+    {
+        var total = trades.Count;
+
+        var wins = trades.Count(IsForexWin);
+        var losses = trades.Count(IsForexLoss);
+        var pending = trades.Count(x => x.Result == "PENDING");
+        var expired = trades.Count(x => x.Result == "EXPIRED");
+        var ambiguous = trades.Count(x => x.Result == "AMBIGUOUS");
+
+        var completed = wins + losses;
+
+        var winRate = completed > 0
+            ? Math.Round((decimal)wins / completed * 100m, 1)
+            : 0;
+
+        var bySymbol = BuildForexSymbolStats(trades);
+
+        return new
+        {
+            total,
+            wins,
+            losses,
+            draws = 0,
+            pending,
+            expired,
+            ambiguous,
+            winRate,
+            bySymbol,
+            bestSymbols = bySymbol
+                .Where(x => x.Total >= 2)
+                .OrderByDescending(x => x.WinRate)
+                .ThenByDescending(x => x.Total)
+                .Take(5)
+                .ToList(),
+            worstSymbols = bySymbol
+                .Where(x => x.Total >= 2)
+                .OrderBy(x => x.WinRate)
+                .ThenByDescending(x => x.Total)
+                .Take(5)
+                .ToList(),
+            trades = trades.Select(x => new
+            {
+                id = x.Id,
+                createdAtAz = ToAzerbaijanTime(x.CreatedAtUtc).ToString("HH:mm:ss"),
+                x.Symbol,
+                x.Direction,
+                x.Result,
+                confidence = (int?)null,
+                x.EntryPrice,
+                x.ExitPrice
+            }).ToList()
+        };
+    }
+
+    private static List<SymbolStat> BuildBinarySymbolStats(List<BinaryTradeResultEntity> trades)
+    {
+        return trades
+            .GroupBy(x => x.Symbol)
+            .Select(group =>
+            {
+                var wins = group.Count(x => x.Result == "WIN");
+                var losses = group.Count(x => x.Result == "LOSS");
+                var pending = group.Count(x => x.Result == "PENDING");
+                var completed = wins + losses;
+
+                return new SymbolStat
+                {
+                    Symbol = group.Key,
+                    Total = group.Count(),
+                    Wins = wins,
+                    Losses = losses,
+                    Pending = pending,
+                    WinRate = completed > 0
+                        ? Math.Round((decimal)wins / completed * 100m, 1)
+                        : 0
+                };
+            })
+            .OrderByDescending(x => x.Total)
+            .ToList();
+    }
+
+    private static List<SymbolStat> BuildForexSymbolStats(List<ForexTradeResultEntity> trades)
+    {
+        return trades
+            .GroupBy(x => x.Symbol)
+            .Select(group =>
+            {
+                var wins = group.Count(IsForexWin);
+                var losses = group.Count(IsForexLoss);
+                var pending = group.Count(x => x.Result == "PENDING");
+                var completed = wins + losses;
+
+                return new SymbolStat
+                {
+                    Symbol = group.Key,
+                    Total = group.Count(),
+                    Wins = wins,
+                    Losses = losses,
+                    Pending = pending,
+                    WinRate = completed > 0
+                        ? Math.Round((decimal)wins / completed * 100m, 1)
+                        : 0
+                };
+            })
+            .OrderByDescending(x => x.Total)
+            .ToList();
+    }
+
+    private static bool IsForexWin(ForexTradeResultEntity trade)
+    {
+        return trade.Result == "WIN" ||
+               trade.Result == "WIN_TP2" ||
+               trade.IsTp1Hit ||
+               trade.IsTp2Hit;
+    }
+
+    private static bool IsForexLoss(ForexTradeResultEntity trade)
+    {
+        return (trade.Result == "LOSS" || trade.IsStopLossHit) &&
+               trade.Result != "WIN" &&
+               trade.Result != "WIN_TP2" &&
+               !trade.IsTp1Hit &&
+               !trade.IsTp2Hit;
     }
 
     private string BuildChartCards(
@@ -1021,6 +1688,66 @@ async function clearCharts(folderName) {
         return sb.ToString();
     }
 
+    private static DateTime ParseAzerbaijanDateOrToday(string? value)
+    {
+        if (DateTime.TryParseExact(
+                value,
+                "yyyy-MM-dd",
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.None,
+                out var date))
+        {
+            return date.Date;
+        }
+
+        return ToAzerbaijanTime(DateTime.UtcNow).Date;
+    }
+
+    private static (DateTime StartUtc, DateTime EndUtc) GetUtcRangeForAzerbaijanDate(DateTime dateAz)
+    {
+        var timeZone = GetAzerbaijanTimeZone();
+
+        var startAz = dateAz.Date;
+        var endAz = startAz.AddDays(1);
+
+        var startUtc = TimeZoneInfo.ConvertTimeToUtc(startAz, timeZone);
+        var endUtc = TimeZoneInfo.ConvertTimeToUtc(endAz, timeZone);
+
+        return (startUtc, endUtc);
+    }
+
+    private static DateTime ToAzerbaijanTime(DateTime utc)
+    {
+        utc = DateTime.SpecifyKind(utc, DateTimeKind.Utc);
+
+        return TimeZoneInfo.ConvertTimeFromUtc(
+            utc,
+            GetAzerbaijanTimeZone());
+    }
+
+    private static TimeZoneInfo GetAzerbaijanTimeZone()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("Azerbaijan Standard Time");
+        }
+        catch
+        {
+            try
+            {
+                return TimeZoneInfo.FindSystemTimeZoneById("Asia/Baku");
+            }
+            catch
+            {
+                return TimeZoneInfo.CreateCustomTimeZone(
+                    "Azerbaijan Time",
+                    TimeSpan.FromHours(4),
+                    "Azerbaijan Time",
+                    "Azerbaijan Time");
+            }
+        }
+    }
+
     public sealed class AdminChartDeleteRequest
     {
         public string FolderName { get; set; } = string.Empty;
@@ -1032,10 +1759,25 @@ async function clearCharts(folderName) {
         public string FolderName { get; set; } = string.Empty;
     }
 
+    public sealed class ReportDateRequest
+    {
+        public string Date { get; set; } = string.Empty;
+    }
+
     private sealed class ChartFileInfo
     {
         public string FileName { get; set; } = string.Empty;
         public string Url { get; set; } = string.Empty;
         public DateTime CreatedAtUtc { get; set; }
+    }
+
+    private sealed class SymbolStat
+    {
+        public string Symbol { get; set; } = string.Empty;
+        public int Total { get; set; }
+        public int Wins { get; set; }
+        public int Losses { get; set; }
+        public int Pending { get; set; }
+        public decimal WinRate { get; set; }
     }
 }

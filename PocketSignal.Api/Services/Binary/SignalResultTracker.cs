@@ -1,5 +1,8 @@
 ﻿using System.Globalization;
 using System.Text;
+using Microsoft.EntityFrameworkCore;
+using PocketSignal.Api.Data;
+using PocketSignal.Api.Data.Entities;
 using PocketSignal.Api.Models.Binary;
 using PocketSignal.Api.Services.MarketData;
 using PocketSignal.Api.Services.Telegram;
@@ -9,9 +12,8 @@ namespace PocketSignal.Api.Services.Binary;
 public class SignalResultTracker : ISignalResultTracker
 {
     private readonly object _lock = new();
-    private readonly List<SignalTradeRecord> _trades = new();
 
-    private readonly IMarketDataService _marketDataService;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ITelegramService _telegramService;
     private readonly ILogger<SignalResultTracker> _logger;
 
@@ -19,11 +21,11 @@ public class SignalResultTracker : ISignalResultTracker
     private int _lastSummarySentCompletedCount;
 
     public SignalResultTracker(
-        IMarketDataService marketDataService,
+        IServiceScopeFactory scopeFactory,
         ITelegramService telegramService,
         ILogger<SignalResultTracker> logger)
     {
-        _marketDataService = marketDataService;
+        _scopeFactory = scopeFactory;
         _telegramService = telegramService;
         _logger = logger;
     }
@@ -44,8 +46,9 @@ public class SignalResultTracker : ISignalResultTracker
 
         var nowUtc = DateTime.UtcNow;
 
-        var record = new SignalTradeRecord
+        var entity = new BinaryTradeResultEntity
         {
+            Id = Guid.NewGuid().ToString("N")[..8],
             Symbol = signal.Symbol,
             Direction = signal.Direction,
             ExpiryMinutes = signal.ExpiryMinutes,
@@ -59,33 +62,36 @@ public class SignalResultTracker : ISignalResultTracker
             Result = "PENDING"
         };
 
-        lock (_lock)
-        {
-            _trades.Add(record);
-        }
+        using var scope = _scopeFactory.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
 
-        return record;
+        dbContext.BinaryTradeResults.Add(entity);
+        dbContext.SaveChanges();
+
+        return Map(entity);
     }
 
     public async Task EvaluateDueSignalsAsync(CancellationToken cancellationToken = default)
     {
-        List<SignalTradeRecord> dueTrades;
+        List<BinaryTradeResultEntity> dueTrades;
 
-        lock (_lock)
+        using (var scope = _scopeFactory.CreateScope())
         {
-            dueTrades = _trades
+            var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+            dueTrades = await dbContext.BinaryTradeResults
                 .Where(x =>
                     x.Result == "PENDING" &&
                     x.DueAtUtc <= DateTime.UtcNow)
                 .OrderBy(x => x.DueAtUtc)
-                .ToList();
+                .ToListAsync(cancellationToken);
         }
 
         foreach (var trade in dueTrades)
         {
             try
             {
-                await EvaluateSingleTradeAsync(trade, cancellationToken);
+                await EvaluateSingleTradeAsync(trade.Id, cancellationToken);
             }
             catch (OperationCanceledException)
             {
@@ -107,13 +113,40 @@ public class SignalResultTracker : ISignalResultTracker
     {
         var today = DateTime.UtcNow.Date;
 
-        lock (_lock)
-        {
-            return _trades
-                .Where(x => x.CreatedAtUtc.Date == today)
-                .OrderByDescending(x => x.CreatedAtUtc)
-                .ToList();
-        }
+        using var scope = _scopeFactory.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+        return dbContext.BinaryTradeResults
+            .AsNoTracking()
+            .Where(x => x.CreatedAtUtc.Date == today)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .ToList()
+            .Select(Map)
+            .ToList();
+    }
+
+    public List<SignalTradeRecord> GetTradesByAzerbaijanDate(DateTime dateAz)
+    {
+        var azTimeZone = GetAzerbaijanTimeZone();
+
+        var startAz = dateAz.Date;
+        var endAz = startAz.AddDays(1);
+
+        var startUtc = TimeZoneInfo.ConvertTimeToUtc(startAz, azTimeZone);
+        var endUtc = TimeZoneInfo.ConvertTimeToUtc(endAz, azTimeZone);
+
+        using var scope = _scopeFactory.CreateScope();
+        var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+        return dbContext.BinaryTradeResults
+            .AsNoTracking()
+            .Where(x =>
+                x.CreatedAtUtc >= startUtc &&
+                x.CreatedAtUtc < endUtc)
+            .OrderByDescending(x => x.CreatedAtUtc)
+            .ToList()
+            .Select(Map)
+            .ToList();
     }
 
     public string GetTodayStatus()
@@ -177,12 +210,37 @@ public class SignalResultTracker : ISignalResultTracker
     }
 
     private async Task EvaluateSingleTradeAsync(
-        SignalTradeRecord trade,
+        string tradeId,
         CancellationToken cancellationToken)
     {
-        var exitPrice = await GetLatestCloseAsync(
-            trade.Symbol,
-            cancellationToken);
+        BinaryTradeResultEntity? trade;
+
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+            trade = await dbContext.BinaryTradeResults
+                .FirstOrDefaultAsync(x => x.Id == tradeId, cancellationToken);
+
+            if (trade == null)
+                return;
+
+            if (trade.Result != "PENDING")
+                return;
+        }
+
+        decimal? exitPrice;
+
+        using (MarketDataApiGroupContext.Use("Binary"))
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var marketDataService = scope.ServiceProvider.GetRequiredService<IMarketDataService>();
+
+            exitPrice = await GetLatestCloseAsync(
+                marketDataService,
+                trade.Symbol,
+                cancellationToken);
+        }
 
         if (exitPrice == null)
         {
@@ -194,40 +252,56 @@ public class SignalResultTracker : ISignalResultTracker
             return;
         }
 
-        string result;
-        decimal difference;
-
-        lock (_lock)
+        using (var scope = _scopeFactory.CreateScope())
         {
-            if (trade.Result != "PENDING")
+            var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+            var entity = await dbContext.BinaryTradeResults
+                .FirstOrDefaultAsync(x => x.Id == tradeId, cancellationToken);
+
+            if (entity == null)
                 return;
 
-            result = CalculateResult(
-                trade.Direction,
-                trade.EntryPrice,
+            if (entity.Result != "PENDING")
+                return;
+
+            var result = CalculateResult(
+                entity.Direction,
+                entity.EntryPrice,
                 exitPrice.Value);
 
-            difference = exitPrice.Value - trade.EntryPrice;
+            var difference = exitPrice.Value - entity.EntryPrice;
 
-            trade.ExitPrice = exitPrice.Value;
-            trade.Difference = difference;
-            trade.Result = result;
-            trade.CheckedAtUtc = DateTime.UtcNow;
+            entity.ExitPrice = exitPrice.Value;
+            entity.Difference = difference;
+            entity.Result = result;
+            entity.CheckedAtUtc = DateTime.UtcNow;
+
+            await dbContext.SaveChangesAsync(cancellationToken);
         }
 
         await NotifyResultOnceAsync(
-            trade,
+            tradeId,
             cancellationToken);
     }
 
     private async Task NotifyResultOnceAsync(
-        SignalTradeRecord trade,
+        string tradeId,
         CancellationToken cancellationToken)
     {
         string message;
+        BinaryTradeResultEntity? tradeForLog;
 
-        lock (_lock)
+        using (var scope = _scopeFactory.CreateScope())
         {
+            var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+            var trade = await dbContext.BinaryTradeResults
+                .FirstOrDefaultAsync(x => x.Id == tradeId, cancellationToken);
+
+            if (trade == null)
+                return;
+
             if (trade.ResultNotifiedAtUtc != null)
                 return;
 
@@ -238,6 +312,10 @@ public class SignalResultTracker : ISignalResultTracker
 
             trade.ResultNotificationMessage = message;
             trade.ResultNotifiedAtUtc = DateTime.UtcNow;
+
+            await dbContext.SaveChangesAsync(cancellationToken);
+
+            tradeForLog = trade;
         }
 
         try
@@ -248,17 +326,25 @@ public class SignalResultTracker : ISignalResultTracker
 
             _logger.LogInformation(
                 "Binary result Telegram-a gonderildi. TradeId: {TradeId} | {Symbol} {Direction} | Result: {Result}",
-                trade.Id,
-                trade.Symbol,
-                trade.Direction,
-                trade.Result);
+                tradeForLog.Id,
+                tradeForLog.Symbol,
+                tradeForLog.Direction,
+                tradeForLog.Result);
         }
         catch
         {
-            lock (_lock)
+            using var scope = _scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
+
+            var trade = await dbContext.BinaryTradeResults
+                .FirstOrDefaultAsync(x => x.Id == tradeId, cancellationToken);
+
+            if (trade != null)
             {
                 trade.ResultNotifiedAtUtc = null;
                 trade.ResultNotificationMessage = string.Empty;
+
+                await dbContext.SaveChangesAsync(cancellationToken);
             }
 
             throw;
@@ -276,12 +362,18 @@ public class SignalResultTracker : ISignalResultTracker
         lock (_lock)
         {
             ResetSummaryMarkerIfNewDay();
+        }
+
+        using (var scope = _scopeFactory.CreateScope())
+        {
+            var dbContext = scope.ServiceProvider.GetRequiredService<PocketSignalDbContext>();
 
             var today = DateTime.UtcNow.Date;
 
-            var todayTrades = _trades
+            var todayTrades = await dbContext.BinaryTradeResults
+                .AsNoTracking()
                 .Where(x => x.CreatedAtUtc.Date == today)
-                .ToList();
+                .ToListAsync(cancellationToken);
 
             var pending = todayTrades.Count(x => x.Result == "PENDING");
             var wins = todayTrades.Count(x => x.Result == "WIN");
@@ -296,11 +388,14 @@ public class SignalResultTracker : ISignalResultTracker
             if (completed % 10 != 0)
                 return;
 
-            if (_lastSummarySentCompletedCount == completed)
-                return;
+            lock (_lock)
+            {
+                if (_lastSummarySentCompletedCount == completed)
+                    return;
 
-            _lastSummarySentCompletedCount = completed;
-            completedToMark = completed;
+                _lastSummarySentCompletedCount = completed;
+                completedToMark = completed;
+            }
 
             summaryMessage = FormatDailySummaryMessage(
                 completed,
@@ -377,11 +472,12 @@ Date UTC: {DateTime.UtcNow:yyyy-MM-dd}
 """;
     }
 
-    private async Task<decimal?> GetLatestCloseAsync(
+    private static async Task<decimal?> GetLatestCloseAsync(
+        IMarketDataService marketDataService,
         string symbol,
         CancellationToken cancellationToken)
     {
-        var response = await _marketDataService.GetCandlesAsync(
+        var response = await marketDataService.GetCandlesAsync(
             symbol,
             "1min",
             5,
@@ -451,7 +547,7 @@ Date UTC: {DateTime.UtcNow:yyyy-MM-dd}
         return "DRAW";
     }
 
-    private static string FormatResultMessage(SignalTradeRecord trade)
+    private static string FormatResultMessage(BinaryTradeResultEntity trade)
     {
         var icon = trade.Result switch
         {
@@ -481,6 +577,53 @@ Expiry: {trade.ExpiryMinutes} dəqiqə
 Confidence: {trade.Confidence}%
 Grade: {trade.Grade}
 """;
+    }
+
+    private static SignalTradeRecord Map(BinaryTradeResultEntity entity)
+    {
+        return new SignalTradeRecord
+        {
+            Id = entity.Id,
+            Symbol = entity.Symbol,
+            Direction = entity.Direction,
+            ExpiryMinutes = entity.ExpiryMinutes,
+            Confidence = entity.Confidence,
+            Grade = entity.Grade,
+            EntryPrice = entity.EntryPrice,
+            ExitPrice = entity.ExitPrice,
+            Difference = entity.Difference,
+            Result = entity.Result,
+            SignalMessage = entity.SignalMessage,
+            ExpiryReason = entity.ExpiryReason,
+            CreatedAtUtc = entity.CreatedAtUtc,
+            DueAtUtc = entity.DueAtUtc,
+            CheckedAtUtc = entity.CheckedAtUtc,
+            ResultNotifiedAtUtc = entity.ResultNotifiedAtUtc,
+            ResultNotificationMessage = entity.ResultNotificationMessage
+        };
+    }
+
+    private static TimeZoneInfo GetAzerbaijanTimeZone()
+    {
+        try
+        {
+            return TimeZoneInfo.FindSystemTimeZoneById("Azerbaijan Standard Time");
+        }
+        catch
+        {
+            try
+            {
+                return TimeZoneInfo.FindSystemTimeZoneById("Asia/Baku");
+            }
+            catch
+            {
+                return TimeZoneInfo.CreateCustomTimeZone(
+                    "Azerbaijan Time",
+                    TimeSpan.FromHours(4),
+                    "Azerbaijan Time",
+                    "Azerbaijan Time");
+            }
+        }
     }
 
     private static string FormatPrice(decimal? value)

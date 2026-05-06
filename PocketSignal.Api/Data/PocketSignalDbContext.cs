@@ -16,9 +16,33 @@ public class PocketSignalDbContext : DbContext
 
     public DbSet<ForexTradeResultEntity> ForexTradeResults => Set<ForexTradeResultEntity>();
 
+    public DbSet<BinaryTradeResultEntity> BinaryTradeResults => Set<BinaryTradeResultEntity>();
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        modelBuilder.Entity<BinaryTradeResultEntity>(entity =>
+        {
+            entity.ToTable("BinaryTradeResults");
+
+            entity.HasKey(x => x.Id);
+
+            entity.Property(x => x.Id).HasMaxLength(20).IsRequired();
+            entity.Property(x => x.Symbol).HasMaxLength(20).IsRequired();
+            entity.Property(x => x.Direction).HasMaxLength(20).IsRequired();
+            entity.Property(x => x.Grade).HasMaxLength(20).IsRequired();
+            entity.Property(x => x.Result).HasMaxLength(30).IsRequired();
+
+            entity.Property(x => x.EntryPrice).HasPrecision(18, 5);
+            entity.Property(x => x.ExitPrice).HasPrecision(18, 5);
+            entity.Property(x => x.Difference).HasPrecision(18, 5);
+
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasIndex(x => x.DueAtUtc);
+            entity.HasIndex(x => x.Symbol);
+            entity.HasIndex(x => x.Result);
+        });
 
         modelBuilder.Entity<ForexSignalEntity>(entity =>
         {
@@ -79,6 +103,10 @@ public class PocketSignalDbContext : DbContext
             entity.Property(x => x.TakeProfit2).HasPrecision(18, 5);
             entity.Property(x => x.ExitPrice).HasPrecision(18, 5);
             entity.Property(x => x.Difference).HasPrecision(18, 5);
+
+            entity.HasIndex(x => x.CreatedAtUtc);
+            entity.HasIndex(x => x.Symbol);
+            entity.HasIndex(x => x.Result);
         });
     }
 }
