@@ -52,7 +52,7 @@ builder.Services.AddSingleton<IAdminRuntimeSettingsService, AdminRuntimeSettings
 builder.Services.AddSingleton<IMarketAnalysisEngine, MarketAnalysisEngine>();
 
 // Binary services
-builder.Services.AddScoped<ISmartSignalService, CoreBinarySignalService>();
+builder.Services.AddScoped<ISmartSignalService, SmartMoneySignalService>();
 builder.Services.AddScoped<ISignalNotificationService, SignalNotificationService>();
 builder.Services.AddScoped<IBinaryChartImageService, BinaryChartImageService>();
 builder.Services.AddSingleton<ISignalResultTracker, SignalResultTracker>();

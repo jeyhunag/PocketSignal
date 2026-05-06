@@ -1,4 +1,5 @@
-﻿using PocketSignal.Api.Services.Admin;
+﻿using PocketSignal.Api.Models.Admin;
+using PocketSignal.Api.Services.Admin;
 using PocketSignal.Api.Services.Forex;
 using PocketSignal.Api.Services.MarketData;
 
@@ -36,6 +37,10 @@ public class ForexWorker : BackgroundService
                     await CheckForexSignalsAsync(stoppingToken);
                 }
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.LogError(ex, "ForexWorker xetasi bas verdi.");
@@ -46,7 +51,9 @@ public class ForexWorker : BackgroundService
             if (intervalSeconds <= 0)
                 intervalSeconds = 300;
 
-            await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken);
+            await Task.Delay(
+                TimeSpan.FromSeconds(intervalSeconds),
+                stoppingToken);
         }
     }
 
@@ -60,11 +67,12 @@ public class ForexWorker : BackgroundService
             return;
         }
 
-        var symbol = settings.ForexActiveSymbol;
+        var symbols = GetActiveForexSymbols(settings);
 
-        if (string.IsNullOrWhiteSpace(symbol))
+        if (symbols.Count == 0)
         {
-            symbol = "GBP/JPY";
+            _logger.LogInformation("ForexWorker ucun aktiv symbol yoxdur.");
+            return;
         }
 
         using var scope = _scopeFactory.CreateScope();
@@ -83,35 +91,88 @@ public class ForexWorker : BackgroundService
 
         await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
 
-        var signal = await forexSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
+        foreach (var symbol in symbols)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                break;
 
-        var result = await forexNotificationService.NotifyIfValidSignalAsync(
-            signal,
-            cancellationToken);
+            try
+            {
+                var signal = await forexSignalService.AnalyzeAsync(
+                    symbol,
+                    cancellationToken);
 
-        var savedSignalId = await forexSignalDatabaseService.SaveSignalAsync(
-            signal,
-            result.Sent,
-            result.Message,
-            cancellationToken);
+                var result = await forexNotificationService.NotifyIfValidSignalAsync(
+                    signal,
+                    cancellationToken);
 
-        _logger.LogInformation(
-            "FOREX signal DB saved. Id: {Id} | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence}",
-            savedSignalId,
-            signal.Symbol,
-            signal.Direction,
-            signal.Confidence);
+                var savedSignalId = await forexSignalDatabaseService.SaveSignalAsync(
+                    signal,
+                    result.Sent,
+                    result.Message,
+                    cancellationToken);
+
+                _logger.LogInformation(
+                    "FOREX signal DB saved. Id: {Id} | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence}",
+                    savedSignalId,
+                    signal.Symbol,
+                    signal.Direction,
+                    signal.Confidence);
+
+                _logger.LogInformation(
+                    "FOREX | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
+                    signal.Symbol,
+                    signal.Direction,
+                    signal.Confidence,
+                    result.Sent,
+                    result.Message);
+
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(700),
+                    cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Forex symbol analizinde xeta oldu. Symbol: {Symbol}",
+                    symbol);
+            }
+        }
 
         await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
+    }
 
-        _logger.LogInformation(
-            "FOREX | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
-            signal.Symbol,
-            signal.Direction,
-            signal.Confidence,
-            result.Sent,
-            result.Message);
+    private static List<string> GetActiveForexSymbols(
+        AdminRuntimeSettings settings)
+    {
+        var result = new List<string>();
+
+        if (settings.ForexActiveSymbols != null)
+        {
+            foreach (var symbol in settings.ForexActiveSymbols)
+            {
+                if (string.IsNullOrWhiteSpace(symbol))
+                    continue;
+
+                if (!result.Contains(symbol))
+                    result.Add(symbol);
+            }
+        }
+
+        if (result.Count == 0 &&
+            !string.IsNullOrWhiteSpace(settings.ForexActiveSymbol))
+        {
+            result.Add(settings.ForexActiveSymbol);
+        }
+
+        if (result.Count == 0)
+            result.Add("GBP/JPY");
+
+        return result;
     }
 }

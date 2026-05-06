@@ -7,59 +7,63 @@ public class AdminRuntimeSettings
     public string BinaryActiveSymbol { get; set; } = "EUR/USD";
 
     public List<string> BinarySymbols { get; set; } = new()
-{
-    "EUR/USD",
-    "GBP/USD",
-    "USD/JPY",
-    "EUR/GBP",
-    "GBP/JPY",
-    "AUD/USD",
-    "USD/CAD",
-    "EUR/JPY",
-
-    "AUD/JPY",
-    "EUR/CAD",
-    "CAD/CHF",
-    "USD/CHF",
-    "CHF/JPY",
-    "AUD/CHF",
-    "GBP/AUD",
-    "EUR/AUD",
-    "CAD/JPY",
-    "AUD/CAD"
-};
+    {
+        "EUR/USD",
+        "GBP/USD",
+        "USD/JPY",
+        "EUR/GBP",
+        "GBP/JPY",
+        "AUD/USD",
+        "USD/CAD",
+        "EUR/JPY",
+        "AUD/JPY",
+        "EUR/CAD",
+        "CAD/CHF",
+        "USD/CHF",
+        "CHF/JPY",
+        "AUD/CHF",
+        "GBP/AUD",
+        "EUR/AUD",
+        "CAD/JPY",
+        "AUD/CAD"
+    };
 
     public bool ForexEnabled { get; set; } = true;
 
+    // Köhnə sistemlə uyğunluq üçün qalır.
     public string ForexActiveSymbol { get; set; } = "GBP/JPY";
 
+    // Yeni sistem: bir və ya çox Forex/Gold/Crypto symbol aktiv ola bilər.
+    public List<string> ForexActiveSymbols { get; set; } = new()
+    {
+        "GBP/JPY"
+    };
+
     public List<string> ForexSymbols { get; set; } = new()
-{
-    "GBP/JPY",
-    "EUR/USD",
-    "USD/JPY",
-    "EUR/GBP",
-    "GBP/USD",
-    "AUD/USD",
-    "USD/CAD",
-    "EUR/JPY",
-
-    "AUD/JPY",
-    "EUR/CAD",
-    "CAD/CHF",
-    "USD/CHF",
-    "CHF/JPY",
-    "AUD/CHF",
-    "GBP/AUD",
-    "EUR/AUD",
-    "CAD/JPY",
-    "AUD/CAD",
-
-    "BTC/USD",
-    "ETH/USD",
-    "XAU/USD",
-    "USOIL"
-};
+    {
+        "GBP/JPY",
+        "EUR/USD",
+        "USD/JPY",
+        "EUR/GBP",
+        "GBP/USD",
+        "AUD/USD",
+        "USD/CAD",
+        "EUR/JPY",
+        "AUD/JPY",
+        "EUR/CAD",
+        "CAD/CHF",
+        "USD/CHF",
+        "CHF/JPY",
+        "AUD/CHF",
+        "GBP/AUD",
+        "EUR/AUD",
+        "CAD/JPY",
+        "AUD/CAD",
+        "BTC/USD",
+        "ETH/USD",
+        "XAU/USD",
+        "USOIL"
+    };
 
     public bool Mt5AutoTradeEnabled { get; set; } = false;
 

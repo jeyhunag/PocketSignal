@@ -32,7 +32,11 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             if (!File.Exists(_filePath))
             {
                 var fresh = CreateDefaultSettings();
-                await SaveInternalAsync(fresh, cancellationToken);
+
+                await SaveInternalAsync(
+                    fresh,
+                    cancellationToken);
+
                 return fresh;
             }
 
@@ -86,11 +90,47 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             settings.BinaryEnabled = request.BinaryEnabled;
             settings.ForexEnabled = request.ForexEnabled;
 
-            if (settings.BinarySymbols.Contains(request.BinaryActiveSymbol))
-                settings.BinaryActiveSymbol = request.BinaryActiveSymbol;
+            var normalizedBinaryActiveSymbol = NormalizeSymbol(
+                request.BinaryActiveSymbol);
 
-            if (settings.ForexSymbols.Contains(request.ForexActiveSymbol))
-                settings.ForexActiveSymbol = request.ForexActiveSymbol;
+            var allowedBinarySymbol = settings.BinarySymbols.FirstOrDefault(x =>
+                string.Equals(
+                    NormalizeSymbol(x),
+                    normalizedBinaryActiveSymbol,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (!string.IsNullOrWhiteSpace(allowedBinarySymbol))
+            {
+                settings.BinaryActiveSymbol = allowedBinarySymbol;
+            }
+
+            settings.ForexActiveSymbols = NormalizeActiveSymbols(
+                request.ForexActiveSymbols,
+                settings.ForexSymbols);
+
+            if (settings.ForexActiveSymbols.Count == 0)
+            {
+                var normalizedForexActiveSymbol = NormalizeSymbol(
+                    request.ForexActiveSymbol);
+
+                var allowedForexSymbol = settings.ForexSymbols.FirstOrDefault(x =>
+                    string.Equals(
+                        NormalizeSymbol(x),
+                        normalizedForexActiveSymbol,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (!string.IsNullOrWhiteSpace(allowedForexSymbol))
+                {
+                    settings.ForexActiveSymbols.Add(allowedForexSymbol);
+                }
+            }
+
+            if (settings.ForexActiveSymbols.Count == 0)
+            {
+                settings.ForexActiveSymbols.Add(settings.ForexSymbols.First());
+            }
+
+            settings.ForexActiveSymbol = settings.ForexActiveSymbols.First();
 
             settings.Mt5AutoTradeEnabled = request.Mt5AutoTradeEnabled;
             settings.Mt5LotSize = ClampLotSize(request.Mt5LotSize);
@@ -98,16 +138,26 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             settings.Mt5MinimumConfidence = Clamp(request.Mt5MinimumConfidence, 50, 99);
             settings.Mt5MinimumGrade = NormalizeGrade(request.Mt5MinimumGrade);
             settings.Mt5CooldownMinutes = Clamp(request.Mt5CooldownMinutes, 0, 1440);
+
             settings.Mt5MaxPendingMinutes = Clamp(
-                request.Mt5MaxPendingMinutes <= 0 ? 10 : request.Mt5MaxPendingMinutes,
+                request.Mt5MaxPendingMinutes <= 0
+                    ? 10
+                    : request.Mt5MaxPendingMinutes,
                 1,
                 1440);
-            settings.Mt5MaxTradesPerDay = Clamp(request.Mt5MaxTradesPerDay, 1, 100);
+
+            settings.Mt5MaxTradesPerDay = Clamp(
+                request.Mt5MaxTradesPerDay,
+                1,
+                100);
+
             settings.Mt5DemoOnly = request.Mt5DemoOnly;
             settings.Mt5OnePositionPerSymbol = request.Mt5OnePositionPerSymbol;
             settings.UpdatedAtUtc = DateTime.UtcNow;
 
-            await SaveInternalAsync(settings, cancellationToken);
+            await SaveInternalAsync(
+                settings,
+                cancellationToken);
 
             return settings;
         }
@@ -148,55 +198,55 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
     private static void Normalize(AdminRuntimeSettings settings)
     {
         var defaultBinarySymbols = new List<string>
-    {
-        "EUR/USD",
-        "GBP/USD",
-        "USD/JPY",
-        "EUR/GBP",
-        "GBP/JPY",
-        "AUD/USD",
-        "USD/CAD",
-        "EUR/JPY",
+        {
+            "EUR/USD",
+            "GBP/USD",
+            "USD/JPY",
+            "EUR/GBP",
+            "GBP/JPY",
+            "AUD/USD",
+            "USD/CAD",
+            "EUR/JPY",
 
-        "AUD/JPY",
-        "EUR/CAD",
-        "CAD/CHF",
-        "USD/CHF",
-        "CHF/JPY",
-        "AUD/CHF",
-        "GBP/AUD",
-        "EUR/AUD",
-        "CAD/JPY",
-        "AUD/CAD"
-    };
+            "AUD/JPY",
+            "EUR/CAD",
+            "CAD/CHF",
+            "USD/CHF",
+            "CHF/JPY",
+            "AUD/CHF",
+            "GBP/AUD",
+            "EUR/AUD",
+            "CAD/JPY",
+            "AUD/CAD"
+        };
 
         var defaultForexSymbols = new List<string>
-    {
-        "GBP/JPY",
-        "EUR/USD",
-        "USD/JPY",
-        "EUR/GBP",
-        "GBP/USD",
-        "AUD/USD",
-        "USD/CAD",
-        "EUR/JPY",
+        {
+            "GBP/JPY",
+            "EUR/USD",
+            "USD/JPY",
+            "EUR/GBP",
+            "GBP/USD",
+            "AUD/USD",
+            "USD/CAD",
+            "EUR/JPY",
 
-        "AUD/JPY",
-        "EUR/CAD",
-        "CAD/CHF",
-        "USD/CHF",
-        "CHF/JPY",
-        "AUD/CHF",
-        "GBP/AUD",
-        "EUR/AUD",
-        "CAD/JPY",
-        "AUD/CAD",
+            "AUD/JPY",
+            "EUR/CAD",
+            "CAD/CHF",
+            "USD/CHF",
+            "CHF/JPY",
+            "AUD/CHF",
+            "GBP/AUD",
+            "EUR/AUD",
+            "CAD/JPY",
+            "AUD/CAD",
 
-        "BTC/USD",
-        "ETH/USD",
-        "XAU/USD",
-        "USOIL"
-    };
+            "BTC/USD",
+            "ETH/USD",
+            "XAU/USD",
+            "USOIL"
+        };
 
         settings.BinarySymbols = MergeSymbols(
             settings.BinarySymbols,
@@ -206,11 +256,56 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             settings.ForexSymbols,
             defaultForexSymbols);
 
-        if (!settings.BinarySymbols.Contains(settings.BinaryActiveSymbol))
-            settings.BinaryActiveSymbol = settings.BinarySymbols.First();
+        if (settings.BinarySymbols.Count == 0)
+        {
+            settings.BinarySymbols = defaultBinarySymbols;
+        }
 
-        if (!settings.ForexSymbols.Contains(settings.ForexActiveSymbol))
-            settings.ForexActiveSymbol = settings.ForexSymbols.First();
+        if (settings.ForexSymbols.Count == 0)
+        {
+            settings.ForexSymbols = defaultForexSymbols;
+        }
+
+        var normalizedBinaryActiveSymbol = NormalizeSymbol(
+            settings.BinaryActiveSymbol);
+
+        var allowedBinarySymbol = settings.BinarySymbols.FirstOrDefault(x =>
+            string.Equals(
+                NormalizeSymbol(x),
+                normalizedBinaryActiveSymbol,
+                StringComparison.OrdinalIgnoreCase));
+
+        settings.BinaryActiveSymbol = !string.IsNullOrWhiteSpace(allowedBinarySymbol)
+            ? allowedBinarySymbol
+            : settings.BinarySymbols.First();
+
+        settings.ForexActiveSymbols = NormalizeActiveSymbols(
+            settings.ForexActiveSymbols,
+            settings.ForexSymbols);
+
+        if (settings.ForexActiveSymbols.Count == 0)
+        {
+            var normalizedForexActiveSymbol = NormalizeSymbol(
+                settings.ForexActiveSymbol);
+
+            var allowedForexSymbol = settings.ForexSymbols.FirstOrDefault(x =>
+                string.Equals(
+                    NormalizeSymbol(x),
+                    normalizedForexActiveSymbol,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (!string.IsNullOrWhiteSpace(allowedForexSymbol))
+            {
+                settings.ForexActiveSymbols.Add(allowedForexSymbol);
+            }
+        }
+
+        if (settings.ForexActiveSymbols.Count == 0)
+        {
+            settings.ForexActiveSymbols.Add(settings.ForexSymbols.First());
+        }
+
+        settings.ForexActiveSymbol = settings.ForexActiveSymbols.First();
 
         settings.Mt5LotSize = ClampLotSize(settings.Mt5LotSize);
         settings.Mt5TakeProfitMode = NormalizeTakeProfitMode(settings.Mt5TakeProfitMode);
@@ -218,17 +313,19 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
         settings.Mt5MinimumGrade = NormalizeGrade(settings.Mt5MinimumGrade);
         settings.Mt5CooldownMinutes = Clamp(settings.Mt5CooldownMinutes, 0, 1440);
 
-        if (settings.Mt5MaxPendingMinutes <= 0)
-            settings.Mt5MaxPendingMinutes = 10;
-        else
-            settings.Mt5MaxPendingMinutes = Clamp(settings.Mt5MaxPendingMinutes, 1, 1440);
+        settings.Mt5MaxPendingMinutes = settings.Mt5MaxPendingMinutes <= 0
+            ? 10
+            : Clamp(settings.Mt5MaxPendingMinutes, 1, 1440);
 
-        settings.Mt5MaxTradesPerDay = Clamp(settings.Mt5MaxTradesPerDay, 1, 100);
+        settings.Mt5MaxTradesPerDay = Clamp(
+            settings.Mt5MaxTradesPerDay,
+            1,
+            100);
     }
 
     private static List<string> MergeSymbols(
-    List<string>? current,
-    List<string> defaults)
+        List<string>? current,
+        List<string> defaults)
     {
         var result = new List<string>();
 
@@ -241,8 +338,16 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
                 if (string.IsNullOrWhiteSpace(normalized))
                     continue;
 
-                if (!result.Contains(normalized))
+                var alreadyExists = result.Any(x =>
+                    string.Equals(
+                        NormalizeSymbol(x),
+                        normalized,
+                        StringComparison.OrdinalIgnoreCase));
+
+                if (!alreadyExists)
+                {
                     result.Add(normalized);
+                }
             }
         }
 
@@ -253,8 +358,56 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
             if (string.IsNullOrWhiteSpace(normalized))
                 continue;
 
-            if (!result.Contains(normalized))
+            var alreadyExists = result.Any(x =>
+                string.Equals(
+                    NormalizeSymbol(x),
+                    normalized,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (!alreadyExists)
+            {
                 result.Add(normalized);
+            }
+        }
+
+        return result;
+    }
+
+    private static List<string> NormalizeActiveSymbols(
+        List<string>? selectedSymbols,
+        List<string> allowedSymbols)
+    {
+        var result = new List<string>();
+
+        if (selectedSymbols == null || selectedSymbols.Count == 0)
+            return result;
+
+        foreach (var symbol in selectedSymbols)
+        {
+            var normalized = NormalizeSymbol(symbol);
+
+            if (string.IsNullOrWhiteSpace(normalized))
+                continue;
+
+            var allowed = allowedSymbols.FirstOrDefault(x =>
+                string.Equals(
+                    NormalizeSymbol(x),
+                    normalized,
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (string.IsNullOrWhiteSpace(allowed))
+                continue;
+
+            var alreadyExists = result.Any(x =>
+                string.Equals(
+                    NormalizeSymbol(x),
+                    NormalizeSymbol(allowed),
+                    StringComparison.OrdinalIgnoreCase));
+
+            if (!alreadyExists)
+            {
+                result.Add(allowed);
+            }
         }
 
         return result;
@@ -305,7 +458,10 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
         };
     }
 
-    private static int Clamp(int value, int min, int max)
+    private static int Clamp(
+        int value,
+        int min,
+        int max)
     {
         if (value < min)
             return min;

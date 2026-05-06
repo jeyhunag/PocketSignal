@@ -152,10 +152,10 @@ public class AdminController : ControllerBase
             settings.BinarySymbols,
             settings.BinaryActiveSymbol);
 
-        var forexRadios = BuildRadioButtons(
-            "forexActiveSymbol",
+        var forexCheckboxes = BuildCheckboxes(
+            "forexActiveSymbols",
             settings.ForexSymbols,
-            settings.ForexActiveSymbol);
+            settings.ForexActiveSymbols);
 
         var binaryChecked = settings.BinaryEnabled ? "checked" : "";
         var forexChecked = settings.ForexEnabled ? "checked" : "";
@@ -173,11 +173,19 @@ public class AdminController : ControllerBase
             "0.##",
             CultureInfo.InvariantCulture);
 
+        var activeForexSymbolsText = settings.ForexActiveSymbols.Count > 0
+            ? string.Join(", ", settings.ForexActiveSymbols)
+            : settings.ForexActiveSymbol;
+
+        var firstForexSymbol = settings.ForexActiveSymbols.Count > 0
+            ? settings.ForexActiveSymbols.First()
+            : settings.ForexActiveSymbol;
+
         var binaryStatusUrl =
             $"/api/market/status?symbol={WebUtility.UrlEncode(settings.BinaryActiveSymbol)}";
 
         var forexStatusUrl =
-            $"/api/forex/status?symbol={WebUtility.UrlEncode(settings.ForexActiveSymbol)}";
+            $"/api/forex/status?symbol={WebUtility.UrlEncode(firstForexSymbol)}";
 
         var binaryChartCards = BuildChartCards(
             "binary-charts",
@@ -416,6 +424,13 @@ public class AdminController : ControllerBase
             color: #a1a1aa;
         }
 
+        .hint {
+            color: #a1a1aa;
+            font-size: 14px;
+            margin-top: -6px;
+            margin-bottom: 14px;
+        }
+
         @media (max-width: 850px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -457,8 +472,12 @@ public class AdminController : ControllerBase
                 Forex aktivdir
             </label>
 
+            <p class="hint">
+                Bir və ya bir neçə Forex / Gold / Crypto cütü seçə bilərsən.
+            </p>
+
             <div class="symbols">
-                {{forexRadios}}
+                {{forexCheckboxes}}
             </div>
         </div>
     </div>
@@ -594,7 +613,7 @@ public class AdminController : ControllerBase
             Forex:
             <span id="forexState">{{(settings.ForexEnabled ? "Aktiv" : "Deaktiv")}}</span>
             /
-            <strong id="forexSymbol">{{WebUtility.HtmlEncode(settings.ForexActiveSymbol)}}</strong>
+            <strong id="forexSymbol">{{WebUtility.HtmlEncode(activeForexSymbolsText)}}</strong>
         </p>
 
         <p>
@@ -621,7 +640,7 @@ public class AdminController : ControllerBase
 
         <p>
             <a id="forexStatusLink" href="{{forexStatusUrl}}" target="_blank">
-                Forex aktiv symbol statusuna bax
+                Forex ilk aktiv symbol statusuna bax
             </a>
         </p>
     </div>
@@ -667,7 +686,14 @@ async function saveSettings() {
     const forexEnabled = document.getElementById("forexEnabled").checked;
 
     const binaryActiveSymbol = document.querySelector("input[name='binaryActiveSymbol']:checked").value;
-    const forexActiveSymbol = document.querySelector("input[name='forexActiveSymbol']:checked").value;
+
+    const forexActiveSymbols = Array
+        .from(document.querySelectorAll("input[name='forexActiveSymbols']:checked"))
+        .map(x => x.value);
+
+    const forexActiveSymbol = forexActiveSymbols.length > 0
+        ? forexActiveSymbols[0]
+        : "";
 
     const mt5AutoTradeEnabled =
         document.querySelector("input[name='mt5AutoTradeEnabled']:checked").value === "true";
@@ -691,6 +717,7 @@ async function saveSettings() {
             binaryActiveSymbol,
             forexEnabled,
             forexActiveSymbol,
+            forexActiveSymbols,
             mt5AutoTradeEnabled,
             mt5LotSize,
             mt5TakeProfitMode,
@@ -716,7 +743,11 @@ async function saveSettings() {
     document.getElementById("binaryState").innerText = settings.binaryEnabled ? "Aktiv" : "Deaktiv";
     document.getElementById("forexState").innerText = settings.forexEnabled ? "Aktiv" : "Deaktiv";
     document.getElementById("binarySymbol").innerText = settings.binaryActiveSymbol;
-    document.getElementById("forexSymbol").innerText = settings.forexActiveSymbol;
+
+    document.getElementById("forexSymbol").innerText =
+        settings.forexActiveSymbols && settings.forexActiveSymbols.length > 0
+            ? settings.forexActiveSymbols.join(", ")
+            : settings.forexActiveSymbol;
 
     document.getElementById("mt5State").innerText = settings.mt5AutoTradeEnabled ? "Aktiv" : "Deaktiv";
     document.getElementById("mt5LotStatus").innerText = settings.mt5LotSize;
@@ -728,8 +759,13 @@ async function saveSettings() {
     document.getElementById("binaryStatusLink").href =
         "/api/market/status?symbol=" + encodeURIComponent(settings.binaryActiveSymbol);
 
+    const firstForexSymbol =
+        settings.forexActiveSymbols && settings.forexActiveSymbols.length > 0
+            ? settings.forexActiveSymbols[0]
+            : settings.forexActiveSymbol;
+
     document.getElementById("forexStatusLink").href =
-        "/api/forex/status?symbol=" + encodeURIComponent(settings.forexActiveSymbol);
+        "/api/forex/status?symbol=" + encodeURIComponent(firstForexSymbol);
 
     resultElement.innerText = "Yadda saxlanıldı.";
     resultElement.className = "success";
@@ -949,6 +985,34 @@ async function clearCharts(folderName) {
             sb.AppendLine($$"""
 <label class="symbol-option">
     <input type="radio" name="{{name}}" value="{{encodedSymbol}}" {{selected}} />
+    {{encodedSymbol}}
+</label>
+""");
+        }
+
+        return sb.ToString();
+    }
+
+    private static string BuildCheckboxes(
+        string name,
+        List<string> symbols,
+        List<string> activeSymbols)
+    {
+        var sb = new StringBuilder();
+
+        activeSymbols ??= new List<string>();
+
+        foreach (var symbol in symbols)
+        {
+            var encodedSymbol = WebUtility.HtmlEncode(symbol);
+
+            var selected = activeSymbols.Contains(symbol)
+                ? "checked"
+                : "";
+
+            sb.AppendLine($$"""
+<label class="symbol-option">
+    <input type="checkbox" name="{{name}}" value="{{encodedSymbol}}" {{selected}} />
     {{encodedSymbol}}
 </label>
 """);

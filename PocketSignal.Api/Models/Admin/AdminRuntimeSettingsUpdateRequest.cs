@@ -8,7 +8,11 @@ public class AdminRuntimeSettingsUpdateRequest
 
     public bool ForexEnabled { get; set; }
 
+    // Köhnə uyğunluq üçün qalır.
     public string ForexActiveSymbol { get; set; } = "GBP/JPY";
+
+    // Yeni multi-select forex symbols.
+    public List<string> ForexActiveSymbols { get; set; } = new();
 
     public bool Mt5AutoTradeEnabled { get; set; }
 
