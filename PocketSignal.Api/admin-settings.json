@@ -1,6 +1,6 @@
 {
   "binaryEnabled": true,
-  "binaryActiveSymbol": "CHF/JPY",
+  "binaryActiveSymbol": "CAD/JPY",
   "binarySymbols": [
     "EUR/USD",
     "GBP/USD",
@@ -21,7 +21,7 @@
     "CAD/JPY",
     "AUD/CAD"
   ],
-  "forexEnabled": true,
+  "forexEnabled": false,
   "forexActiveSymbol": "EUR/USD",
   "forexActiveSymbols": [
     "EUR/USD"
@@ -60,5 +60,5 @@
   "mt5MaxTradesPerDay": 10,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-07T16:47:26.3146582Z"
+  "updatedAtUtc": "2026-05-07T21:20:17.9064875Z"
 }
