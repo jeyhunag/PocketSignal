@@ -24,22 +24,15 @@ public class CoreForexSignalService : IForexSignalService
         string symbol,
         CancellationToken cancellationToken = default)
     {
-        var h1Response = await _marketDataService.GetCandlesAsync(
-            symbol,
-            "1h",
-            160,
-            cancellationToken);
-
-        var m5Response = await _marketDataService.GetCandlesAsync(
+        var response = await _marketDataService.GetCandlesAsync(
             symbol,
             "5min",
             260,
             cancellationToken);
 
-        var h1 = MapCandles(h1Response);
-        var m5 = MapCandles(m5Response);
+        var candles = MapCandles(response);
 
-        if (h1.Count < 60 || m5.Count < 100)
+        if (candles.Count < 220)
         {
             return Wait(
                 symbol,
@@ -47,33 +40,23 @@ public class CoreForexSignalService : IForexSignalService
                 "NO_TRADE",
                 new List<string>
                 {
-                    "Flip Level + Bait and Switch strategiyasi ucun kifayet qeder H1/M5 candle yoxdur."
+                    "Moving Average strategiyasi ucun kifayet qeder M5 candle yoxdur. Minimum 220 candle lazimdir."
                 },
-                BuildStrategyResults(null, null, "UNKNOWN"));
+                BuildStrategyResults(null, null));
         }
-
-        var marketContext = DetectMarketContext(m5);
-        var htfContext = DetectMarketContext(h1);
 
         var longAnalysis = AnalyzeDirection(
             symbol,
             "LONG",
-            h1,
-            m5,
-            marketContext,
-            htfContext);
+            candles);
 
         var shortAnalysis = AnalyzeDirection(
             symbol,
             "SHORT",
-            h1,
-            m5,
-            marketContext,
-            htfContext);
+            candles);
 
         Console.WriteLine(
-            $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] Forex Flip+BaitSwitch | {symbol} | " +
-            $"M5 Context: {marketContext} | H1 Context: {htfContext} | " +
+            $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] Forex MA Strategy | {symbol} | " +
             $"LONG {longAnalysis.Confidence}% [{longAnalysis.DebugSummary}] | " +
             $"SHORT {shortAnalysis.Confidence}% [{shortAnalysis.DebugSummary}]");
 
@@ -87,8 +70,7 @@ public class CoreForexSignalService : IForexSignalService
 
         var strategyResults = BuildStrategyResults(
             longAnalysis,
-            shortAnalysis,
-            marketContext);
+            shortAnalysis);
 
         if (!best.TradeReady)
         {
@@ -99,8 +81,6 @@ public class CoreForexSignalService : IForexSignalService
                 new List<string>
                 {
                     $"Setup hele tam hazir deyil. Best: {best.Direction} {best.Confidence}%.",
-                    $"M5 context: {marketContext}",
-                    $"H1 context: {htfContext}",
                     $"LONG score: {longAnalysis.Confidence}%",
                     $"SHORT score: {shortAnalysis.Confidence}%"
                 }
@@ -121,7 +101,7 @@ public class CoreForexSignalService : IForexSignalService
                 {
                     $"LONG score: {longAnalysis.Confidence}%",
                     $"SHORT score: {shortAnalysis.Confidence}%",
-                    "LONG ve SHORT setup-lari arasinda ferq azdir. Direction temiz deyil."
+                    "LONG ve SHORT setup-lari yaxindir. Direction temiz deyil."
                 },
                 strategyResults);
         }
@@ -134,7 +114,7 @@ public class CoreForexSignalService : IForexSignalService
                 "WATCHLIST",
                 new List<string>
                 {
-                    $"{best.Direction} setup var, amma confidence minimum seviyeye catmadi.",
+                    $"{best.Direction} Moving Average setup var, amma confidence minimum seviyeye catmadi.",
                     $"Confidence: {best.Confidence}%, minimum: {MinimumConfidence}%"
                 }
                 .Concat(best.Reasons)
@@ -150,14 +130,10 @@ public class CoreForexSignalService : IForexSignalService
 
         var reasons = new List<string>
         {
-            $"Flip Level + Bait and Switch {best.Direction} signal tesdiqlendi.",
-            $"M5 context: {marketContext}",
-            $"H1 context: {htfContext}",
-            "Market context tapildi.",
-            "High probability flip level tapildi.",
-            "Bait and switch / liquidity trap candle tapildi.",
-            "Volume confirmation yoxlanildi.",
-            "Higher timeframe alignment yoxlanildi.",
+            $"Moving Average {best.Direction} signal tesdiqlendi.",
+            best.EntryModel,
+            "MA20/MA50 trend ve entry ucun istifade edildi.",
+            "Stop Loss 2 ATR esasinda hesablandi.",
             best.RiskReason
         };
 
@@ -217,221 +193,192 @@ public class CoreForexSignalService : IForexSignalService
     private static DirectionAnalysis AnalyzeDirection(
         string symbol,
         string direction,
-        List<PriceCandle> h1,
-        List<PriceCandle> m5,
-        string marketContext,
-        string htfContext)
+        List<PriceCandle> candles)
     {
         var reasons = new List<string>();
-
-        var last = m5[^1];
 
         var analysis = new DirectionAnalysis
         {
             Direction = direction,
-            EntryPrice = (decimal)last.Close
+            EntryPrice = (decimal)candles[^1].Close
         };
 
-        var avgM5Range = AverageRange(m5.TakeLast(40).ToList());
-        var avgH1Range = AverageRange(h1.TakeLast(40).ToList());
+        var last = candles[^1];
 
-        if (avgM5Range <= 0 || avgH1Range <= 0)
+        var ma20 = MovingAverage(candles, 20, candles.Count - 1);
+        var ma50 = MovingAverage(candles, 50, candles.Count - 1);
+        var ma200 = MovingAverage(candles, 200, candles.Count - 1);
+
+        var ma20Prev = MovingAverage(candles, 20, candles.Count - 6);
+        var ma50Prev = MovingAverage(candles, 50, candles.Count - 6);
+
+        var atr = AverageTrueRange(candles.TakeLast(20).ToList(), 14);
+
+        if (ma20 <= 0 || ma50 <= 0 || ma200 <= 0 || atr <= 0)
         {
-            reasons.Add("Average range hesablanmadi, data duzgun deyil.");
+            reasons.Add("MA20/MA50/MA200 ve ya ATR hesablanmadi.");
             analysis.Reasons = reasons;
             return analysis;
         }
 
-        ScoreMarketContext(
-            direction,
-            marketContext,
-            analysis,
-            reasons);
+        var isMa50Up = ma50 > ma50Prev;
+        var isMa50Down = ma50 < ma50Prev;
 
-        var flipLevels = BuildCandidateFlipLevels(
-            m5,
-            direction,
-            marketContext,
-            avgM5Range);
+        var isMa20Up = ma20 > ma20Prev;
+        var isMa20Down = ma20 < ma20Prev;
 
-        if (flipLevels.Count > 0)
+        var priceAbove20 = last.Close > ma20;
+        var priceBelow20 = last.Close < ma20;
+
+        var priceAbove50 = last.Close > ma50;
+        var priceBelow50 = last.Close < ma50;
+
+        var priceAbove200 = last.Close > ma200;
+        var priceBelow200 = last.Close < ma200;
+
+        var structure = DetectStructure(candles);
+
+        if (direction == "LONG")
         {
-            analysis.HasFlipLevel = true;
-            analysis.Confidence += Math.Min(18, flipLevels.Max(x => x.Score));
-            reasons.Add(direction == "LONG"
-                ? $"LONG ucun flip level namizedleri tapildi. Count: {flipLevels.Count}."
-                : $"SHORT ucun flip level namizedleri tapildi. Count: {flipLevels.Count}.");
-        }
-        else
-        {
-            reasons.Add(direction == "LONG"
-                ? "LONG ucun flip level hele tapilmadi."
-                : "SHORT ucun flip level hele tapilmadi.");
-        }
+            ScoreLongContext(
+                analysis,
+                reasons,
+                structure,
+                isMa20Up,
+                isMa50Up,
+                priceAbove20,
+                priceAbove50,
+                priceAbove200);
 
-        var setup = FindBaitAndSwitchSetup(
-            m5,
-            direction,
-            marketContext,
-            avgM5Range,
-            flipLevels);
+            var swingPullback = DetectLongMa50Pullback(
+                candles,
+                ma50,
+                atr);
 
-        if (setup == null)
-        {
-            var htfProgress = ScoreHtfProgress(
-                h1,
+            var breakout = DetectLongMa20Breakout(
+                candles,
+                ma20,
+                ma50);
+
+            if (swingPullback.IsConfirmed)
+            {
+                analysis.HasMa50Pullback = true;
+                analysis.EntryModel = "MA50 pullback swing entry.";
+                analysis.Confidence += 28;
+                reasons.Add(swingPullback.Reason);
+            }
+            else
+            {
+                reasons.Add(swingPullback.Reason);
+            }
+
+            if (breakout.IsConfirmed)
+            {
+                analysis.HasMa20Breakout = true;
+
+                if (string.IsNullOrWhiteSpace(analysis.EntryModel))
+                    analysis.EntryModel = "MA20 ustunde breakout entry.";
+
+                analysis.Confidence += 24;
+                reasons.Add(breakout.Reason);
+            }
+            else
+            {
+                reasons.Add(breakout.Reason);
+            }
+
+            var riskPlan = BuildRiskPlan(
+                symbol,
                 direction,
-                htfContext,
-                avgH1Range);
+                candles,
+                atr);
 
-            analysis.Confidence += htfProgress.Score;
-            reasons.Add(htfProgress.Reason);
-
-            analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
-            analysis.Reasons = reasons.Distinct().ToList();
-
-            return analysis;
-        }
-
-        analysis.HasBaitSwitch = true;
-        analysis.FlipLevel = setup.Level;
-        analysis.BaitSwitchIndex = setup.BaitSwitchIndex;
-
-        analysis.Confidence += setup.Score;
-
-        reasons.Add(direction == "LONG"
-            ? $"Flip level support kimi mudafie olundu: {FormatPrice(setup.Level)}."
-            : $"Flip level resistance kimi mudafie olundu: {FormatPrice(setup.Level)}.");
-
-        reasons.Add(direction == "LONG"
-            ? "Bait and switch: price level altina gedib geri ustunde baglandi."
-            : "Bait and switch: price level ustune gedib geri altinda baglandi.");
-
-        var volumeConfirmation = HasVolumeConfirmation(
-            m5,
-            direction,
-            setup.BaitSwitchIndex);
-
-        if (volumeConfirmation.IsConfirmed)
-        {
-            analysis.HasVolumeConfirmation = true;
-            analysis.Confidence += 20;
-            reasons.Add(volumeConfirmation.Reason);
+            ApplyRiskPlan(
+                analysis,
+                reasons,
+                riskPlan);
         }
         else
         {
-            analysis.Confidence -= 15;
-            reasons.Add(volumeConfirmation.Reason);
-            reasons.Add("Volume confirmation olmadığı üçün setup real signal səviyyəsinə buraxılmadı.");
+            ScoreShortContext(
+                analysis,
+                reasons,
+                structure,
+                isMa20Down,
+                isMa50Down,
+                priceBelow20,
+                priceBelow50,
+                priceBelow200);
+
+            var swingPullback = DetectShortMa50Pullback(
+                candles,
+                ma50,
+                atr);
+
+            var breakout = DetectShortMa20Breakout(
+                candles,
+                ma20,
+                ma50);
+
+            if (swingPullback.IsConfirmed)
+            {
+                analysis.HasMa50Pullback = true;
+                analysis.EntryModel = "MA50 pullback swing entry.";
+                analysis.Confidence += 28;
+                reasons.Add(swingPullback.Reason);
+            }
+            else
+            {
+                reasons.Add(swingPullback.Reason);
+            }
+
+            if (breakout.IsConfirmed)
+            {
+                analysis.HasMa20Breakout = true;
+
+                if (string.IsNullOrWhiteSpace(analysis.EntryModel))
+                    analysis.EntryModel = "MA20 altinda breakout entry.";
+
+                analysis.Confidence += 24;
+                reasons.Add(breakout.Reason);
+            }
+            else
+            {
+                reasons.Add(breakout.Reason);
+            }
+
+            var riskPlan = BuildRiskPlan(
+                symbol,
+                direction,
+                candles,
+                atr);
+
+            ApplyRiskPlan(
+                analysis,
+                reasons,
+                riskPlan);
         }
 
-        var htfAlignment = CheckHigherTimeframeAlignment(
-            h1,
-            direction,
-            htfContext,
-            setup.Level,
-            avgH1Range);
-
-        if (htfAlignment.IsAligned)
-        {
-            analysis.HasHtfAlignment = true;
-            analysis.Confidence += htfAlignment.Score;
-            reasons.Add(htfAlignment.Reason);
-        }
-        else
-        {
-            analysis.Confidence += htfAlignment.Score;
-            reasons.Add(htfAlignment.Reason);
-        }
-
-        var riskPlan = BuildRiskPlan(
-            symbol,
-            direction,
-            m5,
-            setup,
-            avgM5Range);
-
-        analysis.EntryPrice = riskPlan.Entry;
-        analysis.StopLoss = riskPlan.StopLoss;
-        analysis.TakeProfit1 = riskPlan.TakeProfit1;
-        analysis.TakeProfit2 = riskPlan.TakeProfit2;
-        analysis.RiskPips = riskPlan.RiskPips;
-        analysis.RewardPips1 = riskPlan.RewardPips1;
-        analysis.RewardPips2 = riskPlan.RewardPips2;
-        analysis.RiskReward1 = riskPlan.RiskReward1;
-        analysis.RiskReward2 = riskPlan.RiskReward2;
-        analysis.InvalidLevel = riskPlan.InvalidLevel;
-        analysis.IsRiskPlanValid = riskPlan.IsValid;
-        analysis.InvalidReason = riskPlan.InvalidReason;
-        analysis.RiskReason = riskPlan.Reason;
-
-        if (riskPlan.IsValid)
-        {
-            analysis.Confidence += analysis.HasVolumeConfirmation && analysis.HasHtfAlignment
-                ? 10
-                : 3;
-
-            reasons.Add(riskPlan.Reason);
-        }
-        else
-        {
-            reasons.Add(riskPlan.InvalidReason);
-        }
-
-        if (setup.AgeCandles <= 2)
-        {
-            analysis.Confidence += 5;
-            reasons.Add("Bait and switch tezedir, entry vaxtinda sayilir.");
-        }
-        else if (setup.AgeCandles <= 5)
-        {
-            reasons.Add("Bait and switch yeni sayilir, amma entry gecikmemelidir.");
-        }
-        else
-        {
-            analysis.Confidence -= 10;
-            reasons.Add("Bait and switch kohneleib, entry gecikmis ola biler.");
-        }
-
-        if (!analysis.HasVolumeConfirmation)
-        {
-            analysis.Confidence = Math.Min(analysis.Confidence, 68);
-        }
-
-        if (!analysis.HasHtfAlignment)
-        {
-            analysis.Confidence = Math.Min(analysis.Confidence, 74);
-        }
-
-        if (!analysis.HasVolumeConfirmation || !analysis.HasHtfAlignment)
-        {
-            reasons.Add("Setup tamam deyil: Volume və HTF alignment tamamlanmadan 72%+ real signal sayılmır.");
-        }
-
-        analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
+        analysis.Confidence = Math.Clamp(
+            analysis.Confidence,
+            0,
+            100);
 
         analysis.TradeReady =
-            analysis.HasMarketContext &&
-            analysis.HasFlipLevel &&
-            analysis.HasBaitSwitch &&
-            analysis.HasVolumeConfirmation &&
-            analysis.HasHtfAlignment &&
-            analysis.IsRiskPlanValid &&
-            setup.AgeCandles <= 5;
+            analysis.HasTrendDirection &&
+            (analysis.HasMa50Pullback || analysis.HasMa20Breakout) &&
+            analysis.IsRiskPlanValid;
 
         if (!analysis.TradeReady)
         {
-            if (!analysis.HasVolumeConfirmation)
-                reasons.Add("No trade: volume confirmation yoxdur.");
+            if (!analysis.HasTrendDirection)
+                reasons.Add("No trade: MA trend direction temiz deyil.");
 
-            if (!analysis.HasHtfAlignment)
-                reasons.Add("No trade: higher timeframe alignment yoxdur.");
+            if (!analysis.HasMa50Pullback && !analysis.HasMa20Breakout)
+                reasons.Add("No trade: MA50 pullback ve ya MA20 breakout entry yoxdur.");
 
             if (!analysis.IsRiskPlanValid)
                 reasons.Add("No trade: risk plan uygun deyil.");
-
-            if (setup.AgeCandles > 5)
-                reasons.Add("No trade: entry gecikib.");
         }
 
         analysis.Reasons = reasons.Distinct().ToList();
@@ -439,610 +386,250 @@ public class CoreForexSignalService : IForexSignalService
         return analysis;
     }
 
-    private static void ScoreMarketContext(
-        string direction,
-        string marketContext,
+    private static void ScoreLongContext(
         DirectionAnalysis analysis,
-        List<string> reasons)
+        List<string> reasons,
+        string structure,
+        bool isMa20Up,
+        bool isMa50Up,
+        bool priceAbove20,
+        bool priceAbove50,
+        bool priceAbove200)
     {
-        if (marketContext == "CHOPPY")
+        if (isMa50Up && priceAbove50)
         {
-            analysis.Confidence += 5;
-            reasons.Add("M5 market choppy-dir. Transcript qaydasi: choppy marketde trade yoxdur, ancaq analiz davam edir.");
-            return;
-        }
-
-        var contextAllowed = IsDirectionAllowedByContext(
-            direction,
-            marketContext);
-
-        if (contextAllowed)
-        {
-            analysis.HasMarketContext = true;
-            analysis.Confidence += 15;
-            reasons.Add($"Market context {direction} ucun uygundur: {marketContext}.");
+            analysis.HasTrendDirection = true;
+            analysis.Confidence += 25;
+            reasons.Add("MA50 yuxari baxir ve price MA50 ustundedir.");
         }
         else
         {
-            analysis.Confidence += 5;
-            reasons.Add($"Market context {direction} ucun temiz deyil: {marketContext}.");
-        }
-    }
-
-    private static (int Score, string Reason) ScoreHtfProgress(
-        List<PriceCandle> h1,
-        string direction,
-        string htfContext,
-        double avgH1Range)
-    {
-        if (htfContext == "CHOPPY")
-        {
-            return (
-                0,
-                "H1 choppy-dir, HTF confirmation yoxdur.");
+            reasons.Add("LONG ucun MA50 trend direction tam uygun deyil.");
         }
 
-        if (direction == "LONG" && htfContext == "UPTREND")
+        if (isMa20Up && priceAbove20)
         {
-            return (
-                12,
-                "H1 uptrend-dir, LONG ucun HTF ehtimal var.");
-        }
-
-        if (direction == "SHORT" && htfContext == "DOWNTREND")
-        {
-            return (
-                12,
-                "H1 downtrend-dir, SHORT ucun HTF ehtimal var.");
-        }
-
-        if (htfContext == "RANGE")
-        {
-            var recent = h1.TakeLast(60).ToList();
-            var rangeHigh = recent.Max(x => x.High);
-            var rangeLow = recent.Min(x => x.Low);
-            var last = recent[^1];
-
-            if (direction == "LONG")
-            {
-                var roomToResistance = rangeHigh - last.Close;
-
-                if (roomToResistance >= avgH1Range * 2)
-                {
-                    return (
-                        10,
-                        "H1 range-dir, LONG ucun resistance-a qeder mesafe var.");
-                }
-            }
-            else
-            {
-                var roomToSupport = last.Close - rangeLow;
-
-                if (roomToSupport >= avgH1Range * 2)
-                {
-                    return (
-                        10,
-                        "H1 range-dir, SHORT ucun support-a qeder mesafe var.");
-                }
-            }
-        }
-
-        var htfReversal = HasHtfReversalSweep(
-            h1,
-            direction,
-            avgH1Range);
-
-        if (htfReversal)
-        {
-            return (
-                12,
-                direction == "LONG"
-                    ? "H1 bullish reversal liquidity sweep elameti var."
-                    : "H1 bearish reversal liquidity sweep elameti var.");
-        }
-
-        return (
-            0,
-            $"H1 context {direction} ucun uygun deyil. Context: {htfContext}.");
-    }
-
-    private static string DetectMarketContext(List<PriceCandle> candles)
-    {
-        var recent = candles.TakeLast(80).ToList();
-
-        if (recent.Count < 40)
-            return "CHOPPY";
-
-        var swings = FindSwingPoints(
-            recent,
-            2,
-            2);
-
-        var highs = swings
-            .Where(x => x.Kind == "HIGH")
-            .OrderBy(x => x.Index)
-            .TakeLast(3)
-            .ToList();
-
-        var lows = swings
-            .Where(x => x.Kind == "LOW")
-            .OrderBy(x => x.Index)
-            .TakeLast(3)
-            .ToList();
-
-        if (highs.Count >= 2 && lows.Count >= 2)
-        {
-            var higherHigh =
-                highs[^1].Price > highs[^2].Price;
-
-            var higherLow =
-                lows[^1].Price > lows[^2].Price;
-
-            var lowerHigh =
-                highs[^1].Price < highs[^2].Price;
-
-            var lowerLow =
-                lows[^1].Price < lows[^2].Price;
-
-            if (higherHigh && higherLow)
-                return "UPTREND";
-
-            if (lowerHigh && lowerLow)
-                return "DOWNTREND";
-        }
-
-        var avgRange = AverageRange(recent.TakeLast(40).ToList());
-        var rangeHigh = recent.Max(x => x.High);
-        var rangeLow = recent.Min(x => x.Low);
-        var rangeSize = rangeHigh - rangeLow;
-
-        if (avgRange > 0 && rangeSize <= avgRange * 18)
-            return "RANGE";
-
-        return "CHOPPY";
-    }
-
-    private static bool IsDirectionAllowedByContext(
-        string direction,
-        string marketContext)
-    {
-        if (marketContext == "UPTREND" && direction == "LONG")
-            return true;
-
-        if (marketContext == "DOWNTREND" && direction == "SHORT")
-            return true;
-
-        if (marketContext == "RANGE")
-            return true;
-
-        return false;
-    }
-
-    private static BaitSwitchSetup? FindBaitAndSwitchSetup(
-        List<PriceCandle> candles,
-        string direction,
-        string marketContext,
-        double avgRange,
-        List<FlipLevel> candidateLevels)
-    {
-        var recent = candles.TakeLast(120).ToList();
-
-        if (recent.Count < 60)
-            return null;
-
-        if (candidateLevels.Count == 0)
-            return null;
-
-        var searchStart = Math.Max(0, recent.Count - 30);
-
-        for (var i = recent.Count - 1; i >= searchStart; i--)
-        {
-            var candle = recent[i];
-
-            foreach (var level in candidateLevels)
-            {
-                var tolerance = Math.Max(avgRange * 0.20, level.Price * 0.00003);
-
-                if (direction == "LONG")
-                {
-                    var baitSwitch =
-                        candle.Low < level.Price - tolerance &&
-                        candle.Close > level.Price;
-
-                    if (!baitSwitch)
-                        continue;
-
-                    var defendedLevel =
-                        Math.Abs(candle.Close - level.Price) <= avgRange * 4 ||
-                        candle.Low <= level.Price + avgRange * 0.5;
-
-                    if (!defendedLevel)
-                        continue;
-
-                    return new BaitSwitchSetup
-                    {
-                        Direction = direction,
-                        Level = level.Price,
-                        BaitSwitchIndex = candles.Count - recent.Count + i,
-                        AgeCandles = recent.Count - 1 - i,
-                        SweepPrice = candle.Low,
-                        EntryPrice = candle.Close,
-                        Score = level.Score + 25
-                    };
-                }
-                else
-                {
-                    var baitSwitch =
-                        candle.High > level.Price + tolerance &&
-                        candle.Close < level.Price;
-
-                    if (!baitSwitch)
-                        continue;
-
-                    var defendedLevel =
-                        Math.Abs(candle.Close - level.Price) <= avgRange * 4 ||
-                        candle.High >= level.Price - avgRange * 0.5;
-
-                    if (!defendedLevel)
-                        continue;
-
-                    return new BaitSwitchSetup
-                    {
-                        Direction = direction,
-                        Level = level.Price,
-                        BaitSwitchIndex = candles.Count - recent.Count + i,
-                        AgeCandles = recent.Count - 1 - i,
-                        SweepPrice = candle.High,
-                        EntryPrice = candle.Close,
-                        Score = level.Score + 25
-                    };
-                }
-            }
-        }
-
-        return null;
-    }
-
-    private static List<FlipLevel> BuildCandidateFlipLevels(
-        List<PriceCandle> candles,
-        string direction,
-        string marketContext,
-        double avgRange)
-    {
-        var recent = candles.TakeLast(120).ToList();
-
-        var swings = FindSwingPoints(
-            recent,
-            2,
-            2);
-
-        if (swings.Count < 6)
-            return new List<FlipLevel>();
-
-        var levels = new List<FlipLevel>();
-
-        var swingHighs = swings
-            .Where(x => x.Kind == "HIGH")
-            .OrderByDescending(x => x.Index)
-            .Take(10)
-            .ToList();
-
-        var swingLows = swings
-            .Where(x => x.Kind == "LOW")
-            .OrderByDescending(x => x.Index)
-            .Take(10)
-            .ToList();
-
-        if (direction == "LONG")
-        {
-            foreach (var high in swingHighs)
-            {
-                var brokenAbove = recent
-                    .Skip(high.Index + 1)
-                    .Any(x => x.Close > high.Price);
-
-                if (!brokenAbove)
-                    continue;
-
-                levels.Add(new FlipLevel
-                {
-                    Price = high.Price,
-                    Score = marketContext == "UPTREND" ? 20 : 16
-                });
-            }
-
-            if (marketContext == "RANGE")
-            {
-                foreach (var low in swingLows)
-                {
-                    levels.Add(new FlipLevel
-                    {
-                        Price = low.Price,
-                        Score = 18
-                    });
-                }
-            }
+            analysis.Confidence += 12;
+            reasons.Add("MA20 yuxari momentum destekleyir.");
         }
         else
         {
-            foreach (var low in swingLows)
-            {
-                var brokenBelow = recent
-                    .Skip(low.Index + 1)
-                    .Any(x => x.Close < low.Price);
-
-                if (!brokenBelow)
-                    continue;
-
-                levels.Add(new FlipLevel
-                {
-                    Price = low.Price,
-                    Score = marketContext == "DOWNTREND" ? 20 : 16
-                });
-            }
-
-            if (marketContext == "RANGE")
-            {
-                foreach (var high in swingHighs)
-                {
-                    levels.Add(new FlipLevel
-                    {
-                        Price = high.Price,
-                        Score = 18
-                    });
-                }
-            }
+            reasons.Add("MA20 LONG momentum ucun tam guclu deyil.");
         }
 
-        return MergeLevels(
-                levels,
-                avgRange)
-            .OrderByDescending(x => x.Score)
-            .Take(8)
-            .ToList();
-    }
-
-    private static List<FlipLevel> MergeLevels(
-        List<FlipLevel> levels,
-        double avgRange)
-    {
-        var result = new List<FlipLevel>();
-        var tolerance = Math.Max(avgRange * 0.50, 0.0001);
-
-        foreach (var level in levels.OrderByDescending(x => x.Score))
+        if (priceAbove200)
         {
-            var existing = result.FirstOrDefault(x =>
-                Math.Abs(x.Price - level.Price) <= tolerance);
-
-            if (existing == null)
-            {
-                result.Add(level);
-            }
-            else
-            {
-                existing.Score = Math.Max(existing.Score, level.Score + 2);
-            }
+            analysis.Confidence += 6;
+            reasons.Add("Price MA200 ustundedir, uzun trend LONG ucun destekleyicidir.");
+        }
+        else
+        {
+            reasons.Add("Price MA200 altindadir, uzun trend LONG ucun zeifdir.");
         }
 
-        return result;
+        if (structure == "UPTREND")
+        {
+            analysis.Confidence += 12;
+            reasons.Add("Price structure higher high / higher low formasindadir.");
+        }
+        else
+        {
+            reasons.Add($"Price structure LONG ucun tam uygun deyil: {structure}.");
+        }
     }
 
-    private static (bool IsConfirmed, string Reason) HasVolumeConfirmation(
+    private static void ScoreShortContext(
+        DirectionAnalysis analysis,
+        List<string> reasons,
+        string structure,
+        bool isMa20Down,
+        bool isMa50Down,
+        bool priceBelow20,
+        bool priceBelow50,
+        bool priceBelow200)
+    {
+        if (isMa50Down && priceBelow50)
+        {
+            analysis.HasTrendDirection = true;
+            analysis.Confidence += 25;
+            reasons.Add("MA50 asagi baxir ve price MA50 altindadir.");
+        }
+        else
+        {
+            reasons.Add("SHORT ucun MA50 trend direction tam uygun deyil.");
+        }
+
+        if (isMa20Down && priceBelow20)
+        {
+            analysis.Confidence += 12;
+            reasons.Add("MA20 asagi momentum destekleyir.");
+        }
+        else
+        {
+            reasons.Add("MA20 SHORT momentum ucun tam guclu deyil.");
+        }
+
+        if (priceBelow200)
+        {
+            analysis.Confidence += 6;
+            reasons.Add("Price MA200 altindadir, uzun trend SHORT ucun destekleyicidir.");
+        }
+        else
+        {
+            reasons.Add("Price MA200 ustundedir, uzun trend SHORT ucun zeifdir.");
+        }
+
+        if (structure == "DOWNTREND")
+        {
+            analysis.Confidence += 12;
+            reasons.Add("Price structure lower high / lower low formasindadir.");
+        }
+        else
+        {
+            reasons.Add($"Price structure SHORT ucun tam uygun deyil: {structure}.");
+        }
+    }
+
+    private static (bool IsConfirmed, string Reason) DetectLongMa50Pullback(
         List<PriceCandle> candles,
-        string direction,
-        int baitSwitchIndex)
+        double ma50,
+        double atr)
     {
-        var recentWithVolume = candles
-            .Where(x => x.Volume > 0)
-            .ToList();
+        var recent = candles.TakeLast(8).ToList();
+        var last = candles[^1];
 
-        if (recentWithVolume.Count < 30)
-        {
-            return (
-                false,
-                "Volume confirmation yoxdur: data provider volume melumati qaytarmir ve ya kifayet deyil.");
-        }
+        var touchedMa50 = recent.Any(x =>
+            x.Low <= ma50 + atr * 0.25 &&
+            x.Close >= ma50 - atr * 0.10);
 
-        var start = Math.Max(0, baitSwitchIndex - 30);
+        var rejectedUp =
+            last.Close > ma50 &&
+            last.Close >= last.Open;
 
-        var volumeWindow = candles
-            .Skip(start)
-            .Take(Math.Max(1, baitSwitchIndex - start))
-            .Where(x => x.Volume > 0)
-            .ToList();
-
-        if (volumeWindow.Count < 10)
-        {
-            return (
-                false,
-                "Volume confirmation ucun kifayet qeder kecmis volume yoxdur.");
-        }
-
-        var avgVolume = volumeWindow.Average(x => x.Volume);
-
-        var confirmationCandles = candles
-            .Skip(baitSwitchIndex)
-            .Take(2)
-            .Where(x => x.Volume > 0)
-            .ToList();
-
-        foreach (var candle in confirmationCandles)
-        {
-            if (direction == "LONG")
-            {
-                var strongBuying =
-                    candle.IsBullish &&
-                    candle.Volume >= avgVolume * 1.35;
-
-                if (strongBuying)
-                {
-                    return (
-                        true,
-                        "Bait and switch-den sonra guclu buying volume confirmation var.");
-                }
-            }
-            else
-            {
-                var strongSelling =
-                    candle.IsBearish &&
-                    candle.Volume >= avgVolume * 1.35;
-
-                if (strongSelling)
-                {
-                    return (
-                        true,
-                        "Bait and switch-den sonra guclu selling volume confirmation var.");
-                }
-            }
-        }
-
-        return direction == "LONG"
-            ? (false, "Bait and switch-den sonra guclu buying volume confirmation yoxdur.")
-            : (false, "Bait and switch-den sonra guclu selling volume confirmation yoxdur.");
-    }
-
-    private static (bool IsAligned, int Score, string Reason) CheckHigherTimeframeAlignment(
-        List<PriceCandle> h1,
-        string direction,
-        string htfContext,
-        double level,
-        double avgRange)
-    {
-        if (htfContext == "CHOPPY")
-        {
-            return (
-                false,
-                0,
-                "H1 choppy-dir, higher timeframe alignment yoxdur.");
-        }
-
-        if (direction == "LONG" && htfContext == "UPTREND")
+        if (touchedMa50 && rejectedUp)
         {
             return (
                 true,
-                20,
-                "H1 uptrend-dir, LONG setup higher timeframe ile uygundur.");
-        }
-
-        if (direction == "SHORT" && htfContext == "DOWNTREND")
-        {
-            return (
-                true,
-                20,
-                "H1 downtrend-dir, SHORT setup higher timeframe ile uygundur.");
-        }
-
-        if (htfContext == "RANGE")
-        {
-            var recent = h1.TakeLast(60).ToList();
-
-            var rangeHigh = recent.Max(x => x.High);
-            var rangeLow = recent.Min(x => x.Low);
-            var last = recent[^1];
-
-            if (direction == "LONG")
-            {
-                var roomToResistance = rangeHigh - last.Close;
-
-                if (roomToResistance >= avgRange * 2)
-                {
-                    return (
-                        true,
-                        16,
-                        "H1 range-dir, price supportdan resistance istiqametine hereket ede biler.");
-                }
-
-                return (
-                    false,
-                    4,
-                    "H1 range-dir, amma LONG ucun hedefe kifayet qeder mesafe yoxdur.");
-            }
-            else
-            {
-                var roomToSupport = last.Close - rangeLow;
-
-                if (roomToSupport >= avgRange * 2)
-                {
-                    return (
-                        true,
-                        16,
-                        "H1 range-dir, price resistance-dan support istiqametine hereket ede biler.");
-                }
-
-                return (
-                    false,
-                    4,
-                    "H1 range-dir, amma SHORT ucun hedefe kifayet qeder mesafe yoxdur.");
-            }
-        }
-
-        var htfReversal = HasHtfReversalSweep(
-            h1,
-            direction,
-            avgRange);
-
-        if (htfReversal)
-        {
-            return (
-                true,
-                18,
-                direction == "LONG"
-                    ? "H1 bullish reversal liquidity sweep ile uygundur."
-                    : "H1 bearish reversal liquidity sweep ile uygundur.");
+                "Price MA50 zonasina geri cekildi ve yuxari reaksiya verdi.");
         }
 
         return (
             false,
-            0,
-            $"H1 context {direction} ucun uygun deyil. Context: {htfContext}.");
+            "MA50 pullback LONG entry hele yoxdur.");
     }
 
-    private static bool HasHtfReversalSweep(
+    private static (bool IsConfirmed, string Reason) DetectShortMa50Pullback(
         List<PriceCandle> candles,
-        string direction,
-        double avgRange)
+        double ma50,
+        double atr)
     {
-        var recent = candles.TakeLast(50).ToList();
+        var recent = candles.TakeLast(8).ToList();
+        var last = candles[^1];
 
-        if (recent.Count < 25)
-            return false;
+        var touchedMa50 = recent.Any(x =>
+            x.High >= ma50 - atr * 0.25 &&
+            x.Close <= ma50 + atr * 0.10);
 
-        var reference = recent.Take(recent.Count - 5).ToList();
-        var last5 = recent.TakeLast(5).ToList();
+        var rejectedDown =
+            last.Close < ma50 &&
+            last.Close <= last.Open;
 
-        if (direction == "LONG")
+        if (touchedMa50 && rejectedDown)
         {
-            var keyLow = reference.Min(x => x.Low);
-
-            return last5.Any(x =>
-                x.Low < keyLow &&
-                x.Close > keyLow &&
-                x.LowerWick >= avgRange * 0.20);
+            return (
+                true,
+                "Price MA50 zonasina geri cekildi ve asagi reaksiya verdi.");
         }
 
-        var keyHigh = reference.Max(x => x.High);
+        return (
+            false,
+            "MA50 pullback SHORT entry hele yoxdur.");
+    }
 
-        return last5.Any(x =>
-            x.High > keyHigh &&
-            x.Close < keyHigh &&
-            x.UpperWick >= avgRange * 0.20);
+    private static (bool IsConfirmed, string Reason) DetectLongMa20Breakout(
+        List<PriceCandle> candles,
+        double ma20,
+        double ma50)
+    {
+        var last = candles[^1];
+        var previous = candles[^2];
+
+        var reference = candles
+            .Skip(Math.Max(0, candles.Count - 22))
+            .Take(20)
+            .ToList();
+
+        var recentHigh = reference
+            .Take(reference.Count - 1)
+            .Max(x => x.High);
+
+        var breakout =
+            last.Close > recentHigh &&
+            previous.Close <= recentHigh &&
+            last.Close > ma20 &&
+            last.Close > ma50 &&
+            ma20 > ma50;
+
+        if (breakout)
+        {
+            return (
+                true,
+                "Price MA20 ustunde qalaraq son tepeni breakout etdi.");
+        }
+
+        return (
+            false,
+            "MA20 breakout LONG entry yoxdur.");
+    }
+
+    private static (bool IsConfirmed, string Reason) DetectShortMa20Breakout(
+        List<PriceCandle> candles,
+        double ma20,
+        double ma50)
+    {
+        var last = candles[^1];
+        var previous = candles[^2];
+
+        var reference = candles
+            .Skip(Math.Max(0, candles.Count - 22))
+            .Take(20)
+            .ToList();
+
+        var recentLow = reference
+            .Take(reference.Count - 1)
+            .Min(x => x.Low);
+
+        var breakout =
+            last.Close < recentLow &&
+            previous.Close >= recentLow &&
+            last.Close < ma20 &&
+            last.Close < ma50 &&
+            ma20 < ma50;
+
+        if (breakout)
+        {
+            return (
+                true,
+                "Price MA20 altinda qalaraq son dibi breakout etdi.");
+        }
+
+        return (
+            false,
+            "MA20 breakout SHORT entry yoxdur.");
     }
 
     private static RiskPlan BuildRiskPlan(
         string symbol,
         string direction,
         List<PriceCandle> candles,
-        BaitSwitchSetup setup,
-        double avgRange)
+        double atr)
     {
-        var baitCandle = candles[setup.BaitSwitchIndex];
-        var entry = (decimal)baitCandle.Close;
+        var last = candles[^1];
+        var entry = (decimal)last.Close;
 
-        var bufferDouble = Math.Max(
-            avgRange * 0.50,
-            GetMinimumBuffer(symbol));
+        var recent = candles.TakeLast(14).ToList();
 
-        var buffer = (decimal)bufferDouble;
+        var buffer = (decimal)(atr * 2.0);
 
         decimal stopLoss;
         decimal takeProfit1;
@@ -1052,52 +639,32 @@ public class CoreForexSignalService : IForexSignalService
 
         if (direction == "LONG")
         {
-            invalidLevel = (decimal)setup.SweepPrice;
-            stopLoss = invalidLevel - buffer;
+            var recentLow = (decimal)recent.Min(x => x.Low);
+
+            invalidLevel = recentLow;
+            stopLoss = recentLow - buffer;
 
             if (stopLoss >= entry)
                 stopLoss = entry - Math.Abs(buffer);
 
             risk = entry - stopLoss;
 
-            var nextKeyLevel = FindNextKeyLevel(
-                candles,
-                setup.BaitSwitchIndex,
-                direction,
-                (double)entry);
-
-            takeProfit1 = nextKeyLevel > (double)entry
-                ? (decimal)nextKeyLevel
-                : entry + risk * 2m;
-
-            if (takeProfit1 < entry + risk * 2m)
-                takeProfit1 = entry + risk * 2m;
-
+            takeProfit1 = entry + risk * 2m;
             takeProfit2 = entry + risk * 3m;
         }
         else
         {
-            invalidLevel = (decimal)setup.SweepPrice;
-            stopLoss = invalidLevel + buffer;
+            var recentHigh = (decimal)recent.Max(x => x.High);
+
+            invalidLevel = recentHigh;
+            stopLoss = recentHigh + buffer;
 
             if (stopLoss <= entry)
                 stopLoss = entry + Math.Abs(buffer);
 
             risk = stopLoss - entry;
 
-            var nextKeyLevel = FindNextKeyLevel(
-                candles,
-                setup.BaitSwitchIndex,
-                direction,
-                (double)entry);
-
-            takeProfit1 = nextKeyLevel < (double)entry && nextKeyLevel > 0
-                ? (decimal)nextKeyLevel
-                : entry - risk * 2m;
-
-            if (takeProfit1 > entry - risk * 2m)
-                takeProfit1 = entry - risk * 2m;
-
+            takeProfit1 = entry - risk * 2m;
             takeProfit2 = entry - risk * 3m;
         }
 
@@ -1117,10 +684,10 @@ public class CoreForexSignalService : IForexSignalService
 
         var isValid =
             risk > 0 &&
-            riskReward1 >= 2.0m &&
-            riskReward2 >= 2.0m &&
             riskPips >= GetMinimumRiskPips(symbol) &&
-            riskPips <= GetMaximumRiskPips(symbol);
+            riskPips <= GetMaximumRiskPips(symbol) &&
+            riskReward1 >= 1.8m &&
+            riskReward2 >= 2.5m;
 
         var invalidReason = string.Empty;
 
@@ -1144,44 +711,80 @@ public class CoreForexSignalService : IForexSignalService
             InvalidLevel = invalidLevel,
             IsValid = isValid,
             InvalidReason = invalidReason,
-            Reason = "Entry bait and switch candle close, SL liquidity sweep arxasinda, target next key level ve minimum RR 2:1 esasinda hesablandi."
+            Reason = "SL son swing arxasinda 2 ATR mesafesi ile, TP1 1:2 ve TP2 1:3 risk/reward esasinda hesablandi."
         };
     }
 
-    private static double FindNextKeyLevel(
-        List<PriceCandle> candles,
-        int fromIndex,
-        string direction,
-        double entry)
+    private static void ApplyRiskPlan(
+        DirectionAnalysis analysis,
+        List<string> reasons,
+        RiskPlan riskPlan)
     {
-        var history = candles
-            .Take(Math.Max(1, fromIndex))
-            .ToList();
+        analysis.EntryPrice = riskPlan.Entry;
+        analysis.StopLoss = riskPlan.StopLoss;
+        analysis.TakeProfit1 = riskPlan.TakeProfit1;
+        analysis.TakeProfit2 = riskPlan.TakeProfit2;
+        analysis.RiskPips = riskPlan.RiskPips;
+        analysis.RewardPips1 = riskPlan.RewardPips1;
+        analysis.RewardPips2 = riskPlan.RewardPips2;
+        analysis.RiskReward1 = riskPlan.RiskReward1;
+        analysis.RiskReward2 = riskPlan.RiskReward2;
+        analysis.InvalidLevel = riskPlan.InvalidLevel;
+        analysis.IsRiskPlanValid = riskPlan.IsValid;
+        analysis.InvalidReason = riskPlan.InvalidReason;
+        analysis.RiskReason = riskPlan.Reason;
 
-        var swings = FindSwingPoints(
-            history,
+        if (riskPlan.IsValid)
+        {
+            analysis.Confidence += 13;
+            reasons.Add(riskPlan.Reason);
+        }
+        else
+        {
+            reasons.Add(riskPlan.InvalidReason);
+        }
+    }
+
+    private static string DetectStructure(List<PriceCandle> candles)
+    {
+        var recent = candles.TakeLast(80).ToList();
+
+        var swings = FindSwings(
+            recent,
             2,
             2);
 
-        if (direction == "LONG")
-        {
-            var nextHigh = swings
-                .Where(x => x.Kind == "HIGH" && x.Price > entry)
-                .OrderBy(x => x.Price)
-                .FirstOrDefault();
+        var highs = swings
+            .Where(x => x.Kind == "HIGH")
+            .OrderBy(x => x.Index)
+            .TakeLast(2)
+            .ToList();
 
-            return nextHigh?.Price ?? 0;
+        var lows = swings
+            .Where(x => x.Kind == "LOW")
+            .OrderBy(x => x.Index)
+            .TakeLast(2)
+            .ToList();
+
+        if (highs.Count >= 2 && lows.Count >= 2)
+        {
+            if (highs[1].Price > highs[0].Price &&
+                lows[1].Price > lows[0].Price)
+            {
+                return "UPTREND";
+            }
+
+            if (highs[1].Price < highs[0].Price &&
+                lows[1].Price < lows[0].Price)
+            {
+                return "DOWNTREND";
+            }
         }
 
-        var nextLow = swings
-            .Where(x => x.Kind == "LOW" && x.Price < entry)
-            .OrderByDescending(x => x.Price)
-            .FirstOrDefault();
-
-        return nextLow?.Price ?? 0;
+        return "RANGE";
     }
 
-    private static List<SwingPoint> FindSwingPoints(
+    private static List<SwingPoint> FindSwings(
         List<PriceCandle> candles,
         int left,
         int right)
@@ -1232,10 +835,59 @@ public class CoreForexSignalService : IForexSignalService
         return swings;
     }
 
+    private static double MovingAverage(
+        List<PriceCandle> candles,
+        int period,
+        int endIndex)
+    {
+        if (endIndex < 0)
+            return 0;
+
+        if (endIndex >= candles.Count)
+            endIndex = candles.Count - 1;
+
+        var startIndex = endIndex - period + 1;
+
+        if (startIndex < 0)
+            return 0;
+
+        return candles
+            .Skip(startIndex)
+            .Take(period)
+            .Average(x => x.Close);
+    }
+
+    private static double AverageTrueRange(
+        List<PriceCandle> candles,
+        int period)
+    {
+        if (candles.Count < period + 1)
+            return 0;
+
+        var ranges = new List<double>();
+
+        for (var i = 1; i < candles.Count; i++)
+        {
+            var highLow = candles[i].High - candles[i].Low;
+            var highPrevClose = Math.Abs(candles[i].High - candles[i - 1].Close);
+            var lowPrevClose = Math.Abs(candles[i].Low - candles[i - 1].Close);
+
+            ranges.Add(
+                Math.Max(
+                    highLow,
+                    Math.Max(
+                        highPrevClose,
+                        lowPrevClose)));
+        }
+
+        return ranges
+            .TakeLast(period)
+            .Average();
+    }
+
     private static List<ForexStrategyResult> BuildStrategyResults(
         DirectionAnalysis? longAnalysis,
-        DirectionAnalysis? shortAnalysis,
-        string marketContext)
+        DirectionAnalysis? shortAnalysis)
     {
         var results = new List<ForexStrategyResult>();
 
@@ -1243,7 +895,7 @@ public class CoreForexSignalService : IForexSignalService
         {
             results.Add(new ForexStrategyResult
             {
-                StrategyName = "FlipLevel_BaitSwitch_Volume_HTF",
+                StrategyName = "MA20_MA50_2ATR",
                 Direction = "LONG",
                 Score = longAnalysis.Confidence,
                 MaxScore = 100,
@@ -1256,7 +908,7 @@ public class CoreForexSignalService : IForexSignalService
         {
             results.Add(new ForexStrategyResult
             {
-                StrategyName = "FlipLevel_BaitSwitch_Volume_HTF",
+                StrategyName = "MA20_MA50_2ATR",
                 Direction = "SHORT",
                 Score = shortAnalysis.Confidence,
                 MaxScore = 100,
@@ -1265,18 +917,21 @@ public class CoreForexSignalService : IForexSignalService
             });
         }
 
-        results.Add(new ForexStrategyResult
+        if (results.Count == 0)
         {
-            StrategyName = "MarketContext",
-            Direction = marketContext,
-            Score = marketContext == "CHOPPY" ? 0 : 15,
-            MaxScore = 15,
-            IsConfirmed = marketContext != "CHOPPY",
-            Reasons = new List<string>
+            results.Add(new ForexStrategyResult
             {
-                $"Market context: {marketContext}"
-            }
-        });
+                StrategyName = "MA20_MA50_2ATR",
+                Direction = "WAIT",
+                Score = 0,
+                MaxScore = 100,
+                IsConfirmed = false,
+                Reasons = new List<string>
+                {
+                    "Moving Average setup yoxdur."
+                }
+            });
+        }
 
         return results;
     }
@@ -1359,7 +1014,7 @@ public class CoreForexSignalService : IForexSignalService
                 High = (double)item.High,
                 Low = (double)item.Low,
                 Close = (double)item.Close,
-                Volume = ReadVolume(item)
+                Volume = 0
             });
         }
 
@@ -1368,52 +1023,12 @@ public class CoreForexSignalService : IForexSignalService
             .ToList();
     }
 
-    private static double ReadVolume(object candleDto)
-    {
-        var property = candleDto
-            .GetType()
-            .GetProperty("Volume");
-
-        if (property == null)
-            return 0;
-
-        var value = property.GetValue(candleDto);
-
-        if (value == null)
-            return 0;
-
-        if (value is decimal decimalValue)
-            return (double)decimalValue;
-
-        if (value is double doubleValue)
-            return doubleValue;
-
-        if (value is int intValue)
-            return intValue;
-
-        if (double.TryParse(
-                Convert.ToString(value, CultureInfo.InvariantCulture),
-                NumberStyles.Any,
-                CultureInfo.InvariantCulture,
-                out var parsed))
-        {
-            return parsed;
-        }
-
-        return 0;
-    }
-
     private static decimal RoundPrice(
         string symbol,
         decimal price)
     {
         var digits = GetDigits(symbol);
         return Math.Round(price, digits);
-    }
-
-    private static string FormatPrice(double price)
-    {
-        return price.ToString("0.#####", CultureInfo.InvariantCulture);
     }
 
     private static int GetDigits(string symbol)
@@ -1457,28 +1072,6 @@ public class CoreForexSignalService : IForexSignalService
         return 0.0001m;
     }
 
-    private static double GetMinimumBuffer(string symbol)
-    {
-        symbol = symbol.ToUpperInvariant();
-
-        if (symbol.Contains("JPY"))
-            return 0.03;
-
-        if (symbol.Contains("XAU"))
-            return 0.80;
-
-        if (symbol.Contains("BTC"))
-            return 15;
-
-        if (symbol.Contains("ETH"))
-            return 3;
-
-        if (symbol.Contains("USOIL"))
-            return 0.05;
-
-        return 0.0003;
-    }
-
     private static decimal GetMinimumRiskPips(string symbol)
     {
         symbol = symbol.ToUpperInvariant();
@@ -1506,29 +1099,21 @@ public class CoreForexSignalService : IForexSignalService
         symbol = symbol.ToUpperInvariant();
 
         if (symbol.Contains("JPY"))
-            return 80m;
-
-        if (symbol.Contains("XAU"))
-            return 250m;
-
-        if (symbol.Contains("BTC"))
-            return 2000m;
-
-        if (symbol.Contains("ETH"))
-            return 500m;
-
-        if (symbol.Contains("USOIL"))
             return 100m;
 
-        return 80m;
-    }
+        if (symbol.Contains("XAU"))
+            return 300m;
 
-    private static double AverageRange(List<PriceCandle> candles)
-    {
-        if (candles.Count == 0)
-            return 0;
+        if (symbol.Contains("BTC"))
+            return 2500m;
 
-        return candles.Average(x => x.Range);
+        if (symbol.Contains("ETH"))
+            return 700m;
+
+        if (symbol.Contains("USOIL"))
+            return 150m;
+
+        return 100m;
     }
 
     private sealed class DirectionAnalysis
@@ -1539,21 +1124,15 @@ public class CoreForexSignalService : IForexSignalService
 
         public bool TradeReady { get; set; }
 
-        public bool HasMarketContext { get; set; }
+        public bool HasTrendDirection { get; set; }
 
-        public bool HasFlipLevel { get; set; }
+        public bool HasMa50Pullback { get; set; }
 
-        public bool HasBaitSwitch { get; set; }
-
-        public bool HasVolumeConfirmation { get; set; }
-
-        public bool HasHtfAlignment { get; set; }
+        public bool HasMa20Breakout { get; set; }
 
         public bool IsRiskPlanValid { get; set; }
 
-        public double FlipLevel { get; set; }
-
-        public int BaitSwitchIndex { get; set; }
+        public string EntryModel { get; set; } = string.Empty;
 
         public decimal EntryPrice { get; set; }
 
@@ -1582,31 +1161,7 @@ public class CoreForexSignalService : IForexSignalService
         public List<string> Reasons { get; set; } = new();
 
         public string DebugSummary =>
-            $"Context={HasMarketContext}, Flip={HasFlipLevel}, BaitSwitch={HasBaitSwitch}, Volume={HasVolumeConfirmation}, HTF={HasHtfAlignment}, Risk={IsRiskPlanValid}, Ready={TradeReady}";
-    }
-
-    private sealed class BaitSwitchSetup
-    {
-        public string Direction { get; set; } = string.Empty;
-
-        public double Level { get; set; }
-
-        public int BaitSwitchIndex { get; set; }
-
-        public int AgeCandles { get; set; }
-
-        public double SweepPrice { get; set; }
-
-        public double EntryPrice { get; set; }
-
-        public int Score { get; set; }
-    }
-
-    private sealed class FlipLevel
-    {
-        public double Price { get; set; }
-
-        public int Score { get; set; }
+            $"Trend={HasTrendDirection}, MA50Pullback={HasMa50Pullback}, MA20Breakout={HasMa20Breakout}, Risk={IsRiskPlanValid}, Ready={TradeReady}";
     }
 
     private sealed class RiskPlan
