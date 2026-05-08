@@ -24,8 +24,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Folder Include="wwwroot\binary-charts\" />
-    <Folder Include="wwwroot\forex-charts\" />
+    <Folder Include="wwwroot\" />
   </ItemGroup>
 
 </Project>
