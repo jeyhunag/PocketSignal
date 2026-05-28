@@ -298,11 +298,6 @@ public class AdminController : ControllerBase
             settings.BinarySymbols,
             settings.BinaryActiveSymbol);
 
-        var forexCheckboxes = BuildCheckboxes(
-            "forexActiveSymbols",
-            settings.ForexSymbols,
-            settings.ForexActiveSymbols);
-
         var binaryChecked = settings.BinaryEnabled ? "checked" : "";
         var forexChecked = settings.ForexEnabled ? "checked" : "";
 
@@ -893,10 +888,21 @@ public class AdminController : ControllerBase
 
 <script>
 async function saveSettings() {
-    const binaryEnabled = document.getElementById("binaryEnabled").checked;
-    const forexEnabled = document.getElementById("forexEnabled").checked;
+    const binaryEnabledElement = document.getElementById("binaryEnabled");
+    const forexEnabledElement = document.getElementById("forexEnabled");
 
-    const binaryActiveSymbol = document.querySelector("input[name='binaryActiveSymbol']:checked").value;
+    if (!binaryEnabledElement || !forexEnabledElement) {
+        alert("Admin panel elementləri tam yüklənməyib. Səhifəni yenilə.");
+        return;
+    }
+
+    const binaryEnabled = binaryEnabledElement.checked;
+    const forexEnabled = forexEnabledElement.checked;
+
+    const binaryActiveSymbolInput = document.querySelector("input[name='binaryActiveSymbol']:checked");
+    const binaryActiveSymbol = binaryActiveSymbolInput
+        ? binaryActiveSymbolInput.value
+        : "";
 
     const forexActiveSymbols = Array
         .from(document.querySelectorAll("input[name='forexActiveSymbols']:checked"))
@@ -906,8 +912,12 @@ async function saveSettings() {
         ? forexActiveSymbols[0]
         : "";
 
-    const mt5AutoTradeEnabled =
-        document.querySelector("input[name='mt5AutoTradeEnabled']:checked").value === "true";
+    const mt5AutoTradeInput = document.querySelector("input[name='mt5AutoTradeEnabled']:checked");
+    const mt5AutoTradeEnabled = mt5AutoTradeInput
+        ? mt5AutoTradeInput.value === "true"
+        : false;
+
+    const mt5DemoOnly = document.getElementById("mt5DemoOnly").checked;
 
     const mt5LotSize = Number(document.getElementById("mt5LotSize").value);
     const mt5TakeProfitMode = document.querySelector("input[name='mt5TakeProfitMode']:checked").value;
@@ -915,7 +925,6 @@ async function saveSettings() {
     const mt5MinimumGrade = document.getElementById("mt5MinimumGrade").value;
     const mt5CooldownMinutes = Number(document.getElementById("mt5CooldownMinutes").value);
     const mt5MaxTradesPerDay = Number(document.getElementById("mt5MaxTradesPerDay").value);
-    const mt5DemoOnly = document.getElementById("mt5DemoOnly").checked;
     const mt5OnePositionPerSymbol = document.getElementById("mt5OnePositionPerSymbol").checked;
 
     const response = await fetch("/admin/settings", {

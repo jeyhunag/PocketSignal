@@ -1,4 +1,5 @@
-﻿using PocketSignal.Api.Models.Forex;
+﻿
+using PocketSignal.Api.Models.Forex;
 using PocketSignal.Api.Services.Admin;
 
 namespace PocketSignal.Api.Services.Mt5;
@@ -71,7 +72,7 @@ public class Mt5AutoTradeQueueService : IMt5AutoTradeQueueService
         lock (_lock)
         {
             CleanupOldOrders();
-            ExpirePendingOrders(settings.Mt5MaxPendingMinutes); 
+            ExpirePendingOrders(settings.Mt5MaxPendingMinutes);
 
             var todayUtc = DateTime.UtcNow.Date;
 

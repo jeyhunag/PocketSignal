@@ -1,4 +1,5 @@
 ﻿using System.Globalization;
+using Microsoft.Extensions.Caching.Memory;
 using PocketSignal.Api.Models.Analysis;
 using PocketSignal.Api.Models.Binary;
 using PocketSignal.Api.Models.Common;
@@ -8,58 +9,104 @@ namespace PocketSignal.Api.Services.Binary;
 
 public class CoreBinarySignalService : ISmartSignalService
 {
-    private const int MinimumConfidence = 82;
-    private const int ConflictScoreDistance = 12;
+    private const int MinimumConfidence = 77;
+    private const int ConflictScoreDistance = 10;
+
+    private const int M5Candles = 80;
+    private const int M1CandlesForSetup = 140;
+    private const int M1CandlesForTrend = 200;
+
+    private static readonly TimeSpan WinSymbolCooldown = TimeSpan.FromMinutes(7);
+    private static readonly TimeSpan LossSymbolCooldown = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan DrawSymbolCooldown = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan SameDirectionCooldown = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan SameSetupCooldown = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan AfterTwoLossGlobalCooldown = TimeSpan.FromMinutes(30);
 
     private readonly IMarketDataService _marketDataService;
+    private readonly ISignalResultTracker _signalResultTracker;
+    private readonly IMemoryCache _cache;
 
-    public CoreBinarySignalService(IMarketDataService marketDataService)
+    public CoreBinarySignalService(
+        IMarketDataService marketDataService,
+        ISignalResultTracker signalResultTracker,
+        IMemoryCache cache)
     {
         _marketDataService = marketDataService;
+        _signalResultTracker = signalResultTracker;
+        _cache = cache;
     }
 
     public async Task<SmartTradeSignal> AnalyzeAsync(
         string symbol,
         CancellationToken cancellationToken = default)
     {
+        var todayTrades = _signalResultTracker.GetTodayTrades();
+
+        var preBlock = CheckPreMarketRiskFilters(
+            symbol,
+            todayTrades);
+
+        if (preBlock.IsBlocked)
+        {
+            return Wait(
+                symbol,
+                preBlock.Confidence,
+                0,
+                preBlock.Reason);
+        }
+
         var m5Response = await _marketDataService.GetCandlesAsync(
             symbol,
             "5min",
-            140,
+            M5Candles,
             cancellationToken);
 
         var m1Response = await _marketDataService.GetCandlesAsync(
             symbol,
             "1min",
-            220,
+            M1CandlesForTrend,
             cancellationToken);
 
         var m5 = MapCandles(m5Response);
-        var m1 = MapCandles(m1Response);
+        var m1All = MapCandles(m1Response);
 
-        if (m5.Count < 40 || m1.Count < 60)
+        if (m5.Count < 50 || m1All.Count < 120)
         {
             return Wait(
                 symbol,
                 0,
                 0,
-                "Liquidity Sweep + FVG strategiyasi ucun kifayet qeder M5/M1 candle yoxdur.");
+                "Yeni Binary Core strategiyası üçün kifayət qədər M5/M1 candle yoxdur.");
         }
+
+        var m1Setup = m1All
+            .TakeLast(M1CandlesForSetup)
+            .ToList();
+
+        var m1Trend = m1All
+            .TakeLast(M1CandlesForTrend)
+            .ToList();
+
+        var marketContext = BuildMarketContext(
+            symbol,
+            m5,
+            m1Setup,
+            m1Trend);
 
         var longAnalysis = AnalyzeDirection(
             symbol,
             "LONG",
-            m5,
-            m1);
+            marketContext);
 
         var shortAnalysis = AnalyzeDirection(
             symbol,
             "SHORT",
-            m5,
-            m1);
+            marketContext);
 
         Console.WriteLine(
-            $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] Binary Core | {symbol} | " +
+            $"[{DateTime.UtcNow:yyyy-MM-dd HH:mm:ss} UTC] Binary Core V3 | {symbol} | " +
+            $"M5Trend={marketContext.M5Trend}, M1Trend={marketContext.M1Trend}, Chop={marketContext.IsChoppy}, Vol={marketContext.VolatilityState} | " +
             $"LONG {longAnalysis.Confidence}% [{longAnalysis.DebugSummary}] | " +
             $"SHORT {shortAnalysis.Confidence}% [{shortAnalysis.DebugSummary}]");
 
@@ -71,7 +118,9 @@ public class CoreBinarySignalService : ISmartSignalService
             ? shortAnalysis
             : longAnalysis;
 
-        var lastClose = RoundPrice(symbol, (decimal)m1[^1].Close);
+        var lastClose = RoundPrice(
+            symbol,
+            marketContext.LastClose);
 
         if (!best.TradeReady)
         {
@@ -79,7 +128,7 @@ public class CoreBinarySignalService : ISmartSignalService
                 symbol,
                 best.Confidence,
                 lastClose,
-                $"Setup hele tam hazir deyil. Best: {best.Direction} {best.Confidence}%.",
+                $"Setup hələ tam hazır deyil. Best: {best.Direction} {best.Confidence}%. Model: {best.ModelName}.",
                 longAnalysis,
                 shortAnalysis);
         }
@@ -91,7 +140,7 @@ public class CoreBinarySignalService : ISmartSignalService
                 symbol,
                 Math.Max(best.Confidence, opposite.Confidence),
                 lastClose,
-                $"LONG ve SHORT setup-lari yaxindir. LONG: {longAnalysis.Confidence}%, SHORT: {shortAnalysis.Confidence}%.",
+                $"LONG və SHORT score çox yaxındır. LONG: {longAnalysis.Confidence}%, SHORT: {shortAnalysis.Confidence}%. Direction təmiz deyil.",
                 longAnalysis,
                 shortAnalysis);
         }
@@ -102,14 +151,34 @@ public class CoreBinarySignalService : ISmartSignalService
                 symbol,
                 best.Confidence,
                 lastClose,
-                $"Sweep + FVG setup var, amma confidence kifayet deyil. Confidence: {best.Confidence}%, Minimum: {MinimumConfidence}%.",
+                $"Setup var, amma confidence minimumdan aşağıdır. Confidence: {best.Confidence}%, Minimum: {MinimumConfidence}%.",
+                longAnalysis,
+                shortAnalysis);
+        }
+
+        var postBlock = CheckPostAnalysisDuplicateFilters(
+            symbol,
+            best,
+            todayTrades);
+
+        if (postBlock.IsBlocked)
+        {
+            return Wait(
+                symbol,
+                best.Confidence,
+                lastClose,
+                postBlock.Reason,
                 longAnalysis,
                 shortAnalysis);
         }
 
         var invalidIf = best.Direction == "LONG"
-            ? $"M1 candle {RoundPrice(symbol, best.InvalidPrice)} altinda baglansa signal legvdir."
-            : $"M1 candle {RoundPrice(symbol, best.InvalidPrice)} ustunde baglansa signal legvdir.";
+            ? $"M1 candle {RoundPrice(symbol, best.InvalidPrice)} altında bağlansa signal ləğvdir."
+            : $"M1 candle {RoundPrice(symbol, best.InvalidPrice)} üstündə bağlansa signal ləğvdir.";
+
+        SaveDuplicateLocks(
+            symbol,
+            best);
 
         return new SmartTradeSignal
         {
@@ -119,12 +188,12 @@ public class CoreBinarySignalService : ISmartSignalService
             ExpiryReason = best.ExpiryReason,
             Confidence = best.Confidence,
             Grade = GetGrade(best.Confidence),
-            Message = $"{symbol} {best.Direction} {best.Confidence}% | {best.ExpiryMinutes} deqiqe",
-            EntryType = "NEXT_M1_CANDLE_OPEN_OR_NOW_IF_VALID",
+            Message = $"{symbol} {best.Direction} {best.Confidence}% | {best.ExpiryMinutes} dəqiqə",
+            EntryType = best.ModelName,
             ValidForSeconds = 20,
             LastClose = RoundPrice(symbol, best.EntryPrice),
             InvalidIf = invalidIf,
-            Reasons = best.Reasons,
+            Reasons = best.Reasons.Distinct().ToList(),
             SideAnalyses = new List<SideAnalysis>
             {
                 new SideAnalysis
@@ -144,215 +213,373 @@ public class CoreBinarySignalService : ISmartSignalService
         };
     }
 
+    private (bool IsBlocked, string Reason, int Confidence) CheckPreMarketRiskFilters(
+        string symbol,
+        List<SignalTradeRecord> todayTrades)
+    {
+        var nowUtc = DateTime.UtcNow;
+
+        var consecutiveLosses = CountConsecutiveLosses(todayTrades);
+
+        if (consecutiveLosses >= 4)
+        {
+            return (
+                true,
+                $"Risk qoruması aktivdir: {consecutiveLosses} ardıcıl LOSS var. 5-ci Martingale signalı bloklandı.",
+                0);
+        }
+
+        if (consecutiveLosses >= 2)
+        {
+            var lastLoss = todayTrades
+                .Where(x => x.Result == "LOSS")
+                .OrderByDescending(GetTradeEndTimeUtc)
+                .FirstOrDefault();
+
+            if (lastLoss != null)
+            {
+                var endTime = GetTradeEndTimeUtc(lastLoss);
+
+                if (nowUtc - endTime < AfterTwoLossGlobalCooldown)
+                {
+                    var left = AfterTwoLossGlobalCooldown - (nowUtc - endTime);
+
+                    return (
+                        true,
+                        $"Global risk cooldown aktivdir: {consecutiveLosses} ardıcıl LOSS var. Təxminən {Math.Ceiling(left.TotalMinutes)} dəqiqə sonra yenidən analiz.",
+                        0);
+                }
+            }
+        }
+
+        var pendingSameSymbol = todayTrades.Any(x =>
+            x.Symbol == symbol &&
+            x.Result == "PENDING");
+
+        if (pendingSameSymbol)
+        {
+            return (
+                true,
+                $"{symbol} üzrə hələ PENDING trade var. Yeni signal bloklandı.",
+                0);
+        }
+
+        var lastCompletedForSymbol = todayTrades
+            .Where(x =>
+                x.Symbol == symbol &&
+                (x.Result == "WIN" || x.Result == "LOSS" || x.Result == "DRAW"))
+            .OrderByDescending(GetTradeEndTimeUtc)
+            .FirstOrDefault();
+
+        if (lastCompletedForSymbol != null)
+        {
+            var endTime = GetTradeEndTimeUtc(lastCompletedForSymbol);
+            var elapsed = nowUtc - endTime;
+
+            var cooldown = lastCompletedForSymbol.Result switch
+            {
+                "WIN" => WinSymbolCooldown,
+                "LOSS" => LossSymbolCooldown,
+                "DRAW" => DrawSymbolCooldown,
+                _ => TimeSpan.Zero
+            };
+
+            if (cooldown > TimeSpan.Zero && elapsed < cooldown)
+            {
+                var left = cooldown - elapsed;
+
+                return (
+                    true,
+                    $"{symbol} üzrə {lastCompletedForSymbol.Result} sonrası cooldown aktivdir. Təxminən {Math.Ceiling(left.TotalMinutes)} dəqiqə sonra yenidən analiz.",
+                    0);
+            }
+        }
+
+        return (false, string.Empty, 0);
+    }
+
+    private (bool IsBlocked, string Reason) CheckPostAnalysisDuplicateFilters(
+        string symbol,
+        BinaryDirectionAnalysis best,
+        List<SignalTradeRecord> todayTrades)
+    {
+        var nowUtc = DateTime.UtcNow;
+
+        var sameDirectionRecent = todayTrades.Any(x =>
+            x.Symbol == symbol &&
+            x.Direction == best.Direction &&
+            x.CreatedAtUtc >= nowUtc.Subtract(SameDirectionCooldown));
+
+        if (sameDirectionRecent)
+        {
+            return (
+                true,
+                $"{symbol} {best.Direction} üzrə son {SameDirectionCooldown.TotalMinutes:0} dəqiqədə artıq signal olub. Təkrar signal bloklandı.");
+        }
+
+        var setupKey = BuildSetupCacheKey(
+            symbol,
+            best.Direction,
+            best.ModelName,
+            best.EntryPrice);
+
+        if (_cache.TryGetValue(setupKey, out _))
+        {
+            return (
+                true,
+                $"Eyni setup təkrarlandı: {symbol} {best.Direction} {best.ModelName}. Duplicate setup filter aktivdir.");
+        }
+
+        return (false, string.Empty);
+    }
+
+    private void SaveDuplicateLocks(
+        string symbol,
+        BinaryDirectionAnalysis best)
+    {
+        var setupKey = BuildSetupCacheKey(
+            symbol,
+            best.Direction,
+            best.ModelName,
+            best.EntryPrice);
+
+        _cache.Set(
+            setupKey,
+            true,
+            new MemoryCacheEntryOptions
+            {
+                AbsoluteExpirationRelativeToNow = SameSetupCooldown
+            });
+    }
+
+    private static string BuildSetupCacheKey(
+        string symbol,
+        string direction,
+        string model,
+        decimal entryPrice)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+        var zone = GetEntryZone(normalizedSymbol, entryPrice);
+
+        return $"binary-core-v3:setup:{normalizedSymbol}:{direction}:{model}:{zone}";
+    }
+
+    private static string NormalizeSymbol(string symbol)
+    {
+        return symbol
+            .Replace("/", "_")
+            .Replace("-", "_")
+            .Replace(" ", "")
+            .ToUpperInvariant();
+    }
+
+    private static string GetEntryZone(
+        string normalizedSymbol,
+        decimal entryPrice)
+    {
+        var zoneSize = normalizedSymbol.Contains("JPY")
+            ? 0.025m
+            : 0.00025m;
+
+        if (entryPrice <= 0)
+            return "0";
+
+        var zone = Math.Round(
+            entryPrice / zoneSize,
+            0,
+            MidpointRounding.AwayFromZero);
+
+        return zone.ToString("0", CultureInfo.InvariantCulture);
+    }
+
+    private static int CountConsecutiveLosses(
+        List<SignalTradeRecord> todayTrades)
+    {
+        var completed = todayTrades
+            .Where(x => x.Result == "WIN" || x.Result == "LOSS" || x.Result == "DRAW")
+            .OrderByDescending(GetTradeEndTimeUtc)
+            .ToList();
+
+        var count = 0;
+
+        foreach (var trade in completed)
+        {
+            if (trade.Result == "LOSS")
+            {
+                count++;
+                continue;
+            }
+
+            break;
+        }
+
+        return count;
+    }
+
+    private static DateTime GetTradeEndTimeUtc(
+        SignalTradeRecord trade)
+    {
+        if (trade.DueAtUtc != default)
+            return trade.DueAtUtc;
+
+        if (trade.ExpiryMinutes > 0)
+            return trade.CreatedAtUtc.AddMinutes(trade.ExpiryMinutes);
+
+        return trade.CreatedAtUtc;
+    }
+
+    private static BinaryMarketContext BuildMarketContext(
+        string symbol,
+        List<PriceCandle> m5,
+        List<PriceCandle> m1Setup,
+        List<PriceCandle> m1TrendCandles)
+    {
+        var avgM5Range = AverageRange(m5.TakeLast(30).ToList());
+        var avgM1Range = AverageRange(m1Setup.TakeLast(40).ToList());
+
+        var m5Trend = DetectTrend(
+            m5,
+            30);
+
+        var m1Trend = DetectTrend(
+            m1TrendCandles,
+            80);
+
+        var m1ShortTrend = DetectTrend(
+            m1Setup,
+            30);
+
+        var volatilityState = DetectVolatilityState(
+            m1Setup,
+            avgM1Range);
+
+        var isChoppy = DetectChoppyMarket(
+            m1Setup);
+
+        var last = m1Setup[^1];
+
+        return new BinaryMarketContext
+        {
+            Symbol = symbol,
+            M5 = m5,
+            M1Setup = m1Setup,
+            M1TrendCandles = m1TrendCandles,
+            LastClose = (decimal)last.Close,
+            AvgM5Range = avgM5Range,
+            AvgM1Range = avgM1Range,
+            M5Trend = m5Trend,
+            M1Trend = m1Trend,
+            M1ShortTrend = m1ShortTrend,
+            VolatilityState = volatilityState,
+            IsChoppy = isChoppy
+        };
+    }
+
     private static BinaryDirectionAnalysis AnalyzeDirection(
         string symbol,
         string direction,
-        List<PriceCandle> m5,
-        List<PriceCandle> m1)
+        BinaryMarketContext context)
     {
-        var reasons = new List<string>();
-        var last = m1[^1];
-
-        var avgRangeM5 = AverageRange(m5.TakeLast(30).ToList());
-        var avgRangeM1 = AverageRange(m1.TakeLast(30).ToList());
-
-        if (avgRangeM5 <= 0 || avgRangeM1 <= 0)
-        {
-            return new BinaryDirectionAnalysis
-            {
-                Direction = direction,
-                Confidence = 0,
-                TradeReady = false,
-                EntryPrice = (decimal)last.Close,
-                InvalidPrice = (decimal)last.Close,
-                Reasons = new List<string>
-                {
-                    "Average range hesablanmadi, candle data duzgun deyil."
-                }
-            };
-        }
-
-        var side = direction == "LONG"
-            ? "SELL_SIDE"
-            : "BUY_SIDE";
-
-        var liquidityLevels = FindLiquidityLevels(
-            m5,
-            side,
-            avgRangeM5);
-
         var analysis = new BinaryDirectionAnalysis
         {
             Direction = direction,
-            EntryPrice = (decimal)last.Close,
-            InvalidPrice = (decimal)last.Close
+            EntryPrice = context.LastClose,
+            InvalidPrice = context.LastClose,
+            ModelName = "NO_MODEL"
         };
 
-        if (liquidityLevels.Count == 0)
+        if (context.AvgM1Range <= 0 || context.AvgM5Range <= 0)
         {
-            reasons.Add(direction == "LONG"
-                ? "M5 sell-side liquidity tapilmadi."
-                : "M5 buy-side liquidity tapilmadi.");
-
-            analysis.Confidence = 0;
-            analysis.TradeReady = false;
-            analysis.Reasons = reasons;
-
+            analysis.Reasons.Add("Average range hesablanmadı.");
             return analysis;
         }
 
-        var closestLiquidity = liquidityLevels
-            .OrderBy(x => Math.Abs(last.Close - x.Price))
+        var trendScore = ScoreTrendContext(
+            direction,
+            context,
+            analysis);
+
+        analysis.Confidence += trendScore;
+
+        var trendContinuation = AnalyzeTrendContinuation(
+            direction,
+            context);
+
+        var sweepReversal = AnalyzeSweepReversal(
+            direction,
+            context);
+
+        var breakoutRetest = AnalyzeBreakoutRetest(
+            direction,
+            context);
+
+        var models = new List<BinarySetupModel>
+        {
+            trendContinuation,
+            sweepReversal,
+            breakoutRetest
+        };
+
+        var bestModel = models
+            .OrderByDescending(x => x.Score)
             .First();
 
-        analysis.HasLiquidity = true;
+        analysis.ModelName = bestModel.Name;
+        analysis.Confidence += bestModel.Score;
+        analysis.Reasons.AddRange(bestModel.Reasons);
+        analysis.InvalidPrice = bestModel.InvalidPrice;
+        analysis.EntryPrice = context.LastClose;
 
-        var liquidityScore = Math.Min(22, 10 + closestLiquidity.Strength);
-        analysis.Confidence += liquidityScore;
-
-        reasons.Add(direction == "LONG"
-            ? $"M5 sell-side liquidity var: {closestLiquidity.Price}."
-            : $"M5 buy-side liquidity var: {closestLiquidity.Price}.");
-
-        var distanceToLiquidity = Math.Abs(last.Close - closestLiquidity.Price);
-
-        if (distanceToLiquidity <= avgRangeM1 * 8)
+        if (bestModel.IsConfirmed)
         {
-            analysis.Confidence += 6;
-            reasons.Add("Qiymet M5 liquidity zonasina yaxindir, setup formalaşa bilər.");
-        }
-        else
-        {
-            reasons.Add("M5 liquidity var, amma qiymet hele o zonadan uzaqdir.");
+            analysis.HasModelConfirmation = true;
         }
 
-        var sweep = FindRecentSweep(
-            m1,
-            liquidityLevels,
+        var priceAction = HasPriceActionConfirmation(
             direction,
-            avgRangeM1);
+            context.M1Setup);
 
-        if (sweep == null)
-        {
-            reasons.Add(direction == "LONG"
-                ? "M1 sell-side sweep hele yoxdur."
-                : "M1 buy-side sweep hele yoxdur.");
-
-            analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
-            analysis.TradeReady = false;
-            analysis.Reasons = reasons;
-
-            return analysis;
-        }
-
-        analysis.HasSweep = true;
-        analysis.HasReturnInside = true;
-
-        analysis.Confidence += sweep.Score;
-
-        reasons.Add(direction == "LONG"
-            ? $"M1 sell-side sweep oldu: level {sweep.Level.Price}, age {sweep.AgeCandles} candle."
-            : $"M1 buy-side sweep oldu: level {sweep.Level.Price}, age {sweep.AgeCandles} candle.");
-
-        reasons.Add("Price sweep-den sonra range icine geri qayitdi.");
-
-        var fvg = FindBestFvgAfterSweep(
-            m1,
-            sweep.CandleIndex,
-            direction,
-            avgRangeM1);
-
-        if (fvg == null)
-        {
-            reasons.Add(direction == "LONG"
-                ? "Sweep-den sonra bullish FVG hele yaranmayib."
-                : "Sweep-den sonra bearish FVG hele yaranmayib.");
-
-            analysis.InvalidPrice = direction == "LONG"
-                ? (decimal)sweep.Candle.Low
-                : (decimal)sweep.Candle.High;
-
-            analysis.Confidence = Math.Clamp(analysis.Confidence, 0, 100);
-            analysis.TradeReady = false;
-            analysis.Reasons = reasons;
-
-            return analysis;
-        }
-
-        analysis.HasFvg = true;
-        analysis.IsFvgFresh = fvg.IsFresh;
-
-        if (fvg.IsFresh)
-        {
-            analysis.Confidence += 20;
-            reasons.Add(direction == "LONG"
-                ? $"Sweep-den sonra fresh bullish FVG tapildi: {fvg.Low} - {fvg.High}."
-                : $"Sweep-den sonra fresh bearish FVG tapildi: {fvg.Low} - {fvg.High}.");
-        }
-        else
+        if (priceAction.IsConfirmed)
         {
             analysis.Confidence += 8;
-            reasons.Add(direction == "LONG"
-                ? $"Bullish FVG var, amma daha once mitigated ola biler: {fvg.Low} - {fvg.High}."
-                : $"Bearish FVG var, amma daha once mitigated ola biler: {fvg.Low} - {fvg.High}.");
-        }
-
-        var proximity = GetFvgProximity(
-            last.Close,
-            fvg,
-            avgRangeM1);
-
-        if (proximity.IsInside)
-        {
-            analysis.Confidence += 15;
-            analysis.IsPriceNearFvg = true;
-            reasons.Add("Price FVG entry zone icindedir.");
-        }
-        else if (proximity.IsNear)
-        {
-            analysis.Confidence += 12;
-            analysis.IsPriceNearFvg = true;
-            reasons.Add($"Price FVG entry zone yaxinligindadir. Distance: {proximity.Distance}.");
-        }
-        else if (proximity.IsAcceptable)
-        {
-            analysis.Confidence += 6;
-            analysis.IsPriceNearFvg = false;
-            reasons.Add($"Price FVG-den bir az uzaqdir. Distance: {proximity.Distance}.");
+            analysis.HasPriceAction = true;
+            analysis.Reasons.Add(priceAction.Reason);
         }
         else
         {
-            reasons.Add($"Price FVG entry zone-dan uzaqdir. Distance: {proximity.Distance}.");
+            analysis.Reasons.Add(priceAction.Reason);
         }
 
-        var confirmation = HasM1Confirmation(
-            m1,
-            direction);
-
-        if (confirmation.IsConfirmed)
+        if (context.VolatilityState == "NORMAL")
         {
-            analysis.Confidence += 7;
-            analysis.HasConfirmation = true;
-            reasons.Add(confirmation.Reason);
+            analysis.Confidence += 8;
+            analysis.Reasons.Add("Volatility normaldır.");
         }
-        else
+        else if (context.VolatilityState == "LOW")
         {
-            reasons.Add(confirmation.Reason);
+            analysis.Confidence -= 6;
+            analysis.Reasons.Add("Volatility zəifdir, expiry daha uzun seçilməlidir.");
+        }
+        else if (context.VolatilityState == "HIGH")
+        {
+            analysis.Confidence -= 8;
+            analysis.Reasons.Add("Volatility çox yüksəkdir, fake move riski var.");
         }
 
-        var entryClean = IsEntryClean(
-            last,
-            fvg,
-            avgRangeM1);
-
-        if (entryClean)
+        if (context.IsChoppy)
         {
-            analysis.Confidence += 5;
-            reasons.Add("Entry gecikmis deyil, qiymet FVG-den cox uzaqlasmayib.");
+            analysis.Confidence -= 10;
+            analysis.Reasons.Add("M1 bazar çox qarışıq/choppy görünür.");
         }
-        else
+
+        var directionConflict = HasDirectionConflict(
+            direction,
+            context);
+
+        if (directionConflict)
         {
-            reasons.Add("Entry bir az gecikmis ola biler, qiymet FVG-den uzaqlasib.");
+            analysis.Confidence -= 12;
+            analysis.Reasons.Add("M5 və M1 direction arasında konflikt var.");
         }
 
         analysis.Confidence = Math.Clamp(
@@ -360,486 +587,430 @@ public class CoreBinarySignalService : ISmartSignalService
             0,
             100);
 
-        analysis.EntryPrice = (decimal)last.Close;
-
-        analysis.InvalidPrice = direction == "LONG"
-            ? (decimal)Math.Min(sweep.Candle.Low, fvg.Low)
-            : (decimal)Math.Max(sweep.Candle.High, fvg.High);
-
-        var expiry = CalculateExpiry(
+        analysis.ExpiryMinutes = CalculateExpiry(
             direction,
-            m1,
-            sweep,
-            fvg,
-            proximity,
-            avgRangeM1,
-            analysis.Confidence,
-            analysis.HasConfirmation,
-            entryClean);
+            context,
+            analysis,
+            bestModel);
 
-        analysis.ExpiryMinutes = expiry.Minutes;
-        analysis.ExpiryReason = expiry.Reason;
-
-        reasons.Add(expiry.Reason);
+        analysis.ExpiryReason =
+            $"Core V3 expiry: {analysis.ExpiryMinutes} dəqiqə seçildi. Model: {analysis.ModelName}. Volatility: {context.VolatilityState}.";
 
         analysis.TradeReady =
-            analysis.HasLiquidity &&
-            analysis.HasSweep &&
-            analysis.HasReturnInside &&
-            analysis.HasFvg &&
-            analysis.IsFvgFresh &&
-            analysis.IsPriceNearFvg &&
-            sweep.AgeCandles <= 35;
+            analysis.HasModelConfirmation &&
+            analysis.HasPriceAction &&
+            !directionConflict &&
+            !context.IsChoppy &&
+            analysis.Confidence >= MinimumConfidence;
 
         if (!analysis.TradeReady)
         {
-            if (!analysis.IsFvgFresh)
-                reasons.Add("No trade: FVG fresh/unmitigated deyil.");
+            if (!analysis.HasModelConfirmation)
+                analysis.Reasons.Add("No trade: trend/sweep/breakout modeli təsdiqlənmədi.");
 
-            if (!analysis.IsPriceNearFvg)
-                reasons.Add("No trade: Price FVG entry zone yaxinliginda deyil.");
+            if (!analysis.HasPriceAction)
+                analysis.Reasons.Add("No trade: M1 price action təsdiqi yoxdur.");
 
-            if (sweep.AgeCandles > 35)
-                reasons.Add("No trade: Sweep artiq gecikmisdir.");
+            if (directionConflict)
+                analysis.Reasons.Add("No trade: direction konflikti var.");
+
+            if (context.IsChoppy)
+                analysis.Reasons.Add("No trade: bazar choppy-dir.");
         }
 
-        analysis.Reasons = reasons.Distinct().ToList();
+        analysis.Reasons = analysis.Reasons
+            .Distinct()
+            .ToList();
 
         return analysis;
     }
 
-    private static List<LiquidityLevel> FindLiquidityLevels(
-        List<PriceCandle> m5,
-        string side,
-        double avgRange)
-    {
-        var levels = new List<LiquidityLevel>();
-
-        var recent = m5
-            .TakeLast(80)
-            .ToList();
-
-        if (recent.Count < 20)
-            return levels;
-
-        var tolerance = Math.Max(
-            avgRange * 0.35,
-            recent[^1].Close * 0.00008);
-
-        var swings = FindSwings(
-                recent,
-                2,
-                2)
-            .Where(x =>
-                side == "BUY_SIDE"
-                    ? x.Kind == "HIGH"
-                    : x.Kind == "LOW")
-            .ToList();
-
-        foreach (var swing in swings)
-        {
-            levels.Add(new LiquidityLevel
-            {
-                Side = side,
-                Price = swing.Price,
-                TimeUtc = swing.TimeUtc,
-                Strength = 8,
-                Reasons = new List<string>
-                {
-                    side == "BUY_SIDE"
-                        ? "M5 swing high liquidity."
-                        : "M5 swing low liquidity."
-                }
-            });
-        }
-
-        foreach (var level in levels)
-        {
-            var equalCount = levels.Count(x =>
-                !ReferenceEquals(x, level) &&
-                Math.Abs(x.Price - level.Price) <= tolerance);
-
-            if (equalCount > 0)
-            {
-                level.Strength += Math.Min(8, equalCount * 3);
-                level.Reasons.Add("Equal high/low cluster liquidity.");
-            }
-
-            var ageMinutes = Math.Abs(
-                (recent[^1].TimeUtc - level.TimeUtc).TotalMinutes);
-
-            if (ageMinutes <= 180)
-            {
-                level.Strength += 2;
-                level.Reasons.Add("Recent M5 liquidity.");
-            }
-        }
-
-        var extremeCandle = side == "BUY_SIDE"
-            ? recent.OrderByDescending(x => x.High).First()
-            : recent.OrderBy(x => x.Low).First();
-
-        var extremePrice = side == "BUY_SIDE"
-            ? extremeCandle.High
-            : extremeCandle.Low;
-
-        if (!levels.Any(x => Math.Abs(x.Price - extremePrice) <= tolerance))
-        {
-            levels.Add(new LiquidityLevel
-            {
-                Side = side,
-                Price = extremePrice,
-                TimeUtc = extremeCandle.TimeUtc,
-                Strength = 10,
-                Reasons = new List<string>
-                {
-                    side == "BUY_SIDE"
-                        ? "M5 recent range high liquidity."
-                        : "M5 recent range low liquidity."
-                }
-            });
-        }
-
-        var distinct = new List<LiquidityLevel>();
-
-        foreach (var level in levels
-                     .OrderByDescending(x => x.Strength)
-                     .ThenByDescending(x => x.TimeUtc))
-        {
-            if (distinct.Any(x => Math.Abs(x.Price - level.Price) <= tolerance))
-                continue;
-
-            distinct.Add(level);
-        }
-
-        return distinct
-            .Take(10)
-            .ToList();
-    }
-
-    private static SweepInfo? FindRecentSweep(
-        List<PriceCandle> m1,
-        List<LiquidityLevel> levels,
+    private static int ScoreTrendContext(
         string direction,
-        double avgRange)
+        BinaryMarketContext context,
+        BinaryDirectionAnalysis analysis)
     {
-        var startIndex = Math.Max(
-            0,
-            m1.Count - 80);
+        var score = 0;
 
-        for (var i = m1.Count - 1; i >= startIndex; i--)
+        if (direction == "LONG")
         {
-            var candle = m1[i];
-            SweepInfo? bestAtCandle = null;
-
-            foreach (var level in levels)
+            if (context.M5Trend == "UP")
             {
-                var swept = direction == "LONG"
-                    ? candle.Low < level.Price
-                    : candle.High > level.Price;
-
-                if (!swept)
-                    continue;
-
-                var returnInsideIndex = FindReturnInsideIndex(
-                    m1,
-                    i,
-                    level.Price,
-                    direction);
-
-                if (returnInsideIndex < 0)
-                    continue;
-
-                var ageCandles = m1.Count - 1 - i;
-
-                var wick = direction == "LONG"
-                    ? candle.LowerWick
-                    : candle.UpperWick;
-
-                var rejectionBonus = wick >= Math.Max(candle.Body * 0.8, avgRange * 0.20)
-                    ? 5
-                    : 0;
-
-                var quickReturnBonus = returnInsideIndex == i
-                    ? 5
-                    : 2;
-
-                var recencyBonus = ageCandles switch
-                {
-                    <= 5 => 8,
-                    <= 15 => 5,
-                    <= 30 => 2,
-                    _ => 0
-                };
-
-                var levelBonus = Math.Min(
-                    6,
-                    level.Strength / 2);
-
-                var score =
-                    15 +
-                    rejectionBonus +
-                    quickReturnBonus +
-                    recencyBonus +
-                    levelBonus;
-
-                var candidate = new SweepInfo
-                {
-                    Candle = candle,
-                    CandleIndex = i,
-                    ReturnInsideIndex = returnInsideIndex,
-                    Level = level,
-                    AgeCandles = ageCandles,
-                    Score = Math.Clamp(score, 0, 32)
-                };
-
-                if (bestAtCandle == null || candidate.Score > bestAtCandle.Score)
-                    bestAtCandle = candidate;
+                score += 14;
+                analysis.Reasons.Add("M5 trend LONG istiqamətini dəstəkləyir.");
             }
-
-            if (bestAtCandle != null)
-                return bestAtCandle;
-        }
-
-        return null;
-    }
-
-    private static int FindReturnInsideIndex(
-        List<PriceCandle> m1,
-        int sweepIndex,
-        double level,
-        string direction)
-    {
-        var maxIndex = Math.Min(
-            m1.Count - 1,
-            sweepIndex + 2);
-
-        for (var i = sweepIndex; i <= maxIndex; i++)
-        {
-            var closedInside = direction == "LONG"
-                ? m1[i].Close > level
-                : m1[i].Close < level;
-
-            if (closedInside)
-                return i;
-        }
-
-        return -1;
-    }
-
-    private static FvgZone? FindBestFvgAfterSweep(
-        List<PriceCandle> m1,
-        int sweepIndex,
-        string direction,
-        double avgRange)
-    {
-        var zones = new List<FvgZone>();
-
-        var startIndex = Math.Max(
-            2,
-            sweepIndex + 1);
-
-        for (var i = startIndex; i < m1.Count; i++)
-        {
-            var c1 = m1[i - 2];
-            var c2 = m1[i - 1];
-            var c3 = m1[i];
-
-            if (direction == "LONG")
+            else if (context.M5Trend == "NEUTRAL")
             {
-                var hasBullishFvg = c1.High < c3.Low;
-
-                if (!hasBullishFvg)
-                    continue;
-
-                var low = c1.High;
-                var high = c3.Low;
-                var size = high - low;
-
-                if (size <= 0)
-                    continue;
-
-                if (size < avgRange * 0.02)
-                    continue;
-
-                var displacement =
-                    c2.IsBullish ||
-                    c3.IsBullish ||
-                    c2.Close > c1.Close ||
-                    c3.Close > c2.Close;
-
-                var zone = new FvgZone
-                {
-                    Low = low,
-                    High = high,
-                    CreatedIndex = i,
-                    CreatedAtUtc = c3.TimeUtc,
-                    AgeCandles = m1.Count - 1 - i
-                };
-
-                zone.IsFresh = !IsFvgMitigatedBeforeLast(
-                    zone,
-                    m1,
-                    direction);
-
-                zone.Score = CalculateFvgScore(
-                    zone,
-                    avgRange);
-
-                if (displacement)
-                    zone.Score += 3;
-
-                zones.Add(zone);
+                score += 6;
+                analysis.Reasons.Add("M5 trend neytraldır.");
             }
             else
             {
-                var hasBearishFvg = c1.Low > c3.High;
+                analysis.Reasons.Add("M5 trend LONG üçün uyğun deyil.");
+            }
 
-                if (!hasBearishFvg)
-                    continue;
+            if (context.M1Trend == "UP")
+            {
+                score += 16;
+                analysis.Reasons.Add("M1 200 candle trend LONG istiqamətindədir.");
+            }
+            else if (context.M1Trend == "NEUTRAL")
+            {
+                score += 7;
+                analysis.Reasons.Add("M1 200 candle trend neytraldır.");
+            }
+            else
+            {
+                analysis.Reasons.Add("M1 200 candle trend LONG üçün uyğun deyil.");
+            }
 
-                var low = c3.High;
-                var high = c1.Low;
-                var size = high - low;
+            if (context.M1ShortTrend == "UP")
+            {
+                score += 8;
+                analysis.Reasons.Add("M1 qısa trend LONG istiqamətindədir.");
+            }
+        }
+        else
+        {
+            if (context.M5Trend == "DOWN")
+            {
+                score += 14;
+                analysis.Reasons.Add("M5 trend SHORT istiqamətini dəstəkləyir.");
+            }
+            else if (context.M5Trend == "NEUTRAL")
+            {
+                score += 6;
+                analysis.Reasons.Add("M5 trend neytraldır.");
+            }
+            else
+            {
+                analysis.Reasons.Add("M5 trend SHORT üçün uyğun deyil.");
+            }
 
-                if (size <= 0)
-                    continue;
+            if (context.M1Trend == "DOWN")
+            {
+                score += 16;
+                analysis.Reasons.Add("M1 200 candle trend SHORT istiqamətindədir.");
+            }
+            else if (context.M1Trend == "NEUTRAL")
+            {
+                score += 7;
+                analysis.Reasons.Add("M1 200 candle trend neytraldır.");
+            }
+            else
+            {
+                analysis.Reasons.Add("M1 200 candle trend SHORT üçün uyğun deyil.");
+            }
 
-                if (size < avgRange * 0.02)
-                    continue;
-
-                var displacement =
-                    c2.IsBearish ||
-                    c3.IsBearish ||
-                    c2.Close < c1.Close ||
-                    c3.Close < c2.Close;
-
-                var zone = new FvgZone
-                {
-                    Low = low,
-                    High = high,
-                    CreatedIndex = i,
-                    CreatedAtUtc = c3.TimeUtc,
-                    AgeCandles = m1.Count - 1 - i
-                };
-
-                zone.IsFresh = !IsFvgMitigatedBeforeLast(
-                    zone,
-                    m1,
-                    direction);
-
-                zone.Score = CalculateFvgScore(
-                    zone,
-                    avgRange);
-
-                if (displacement)
-                    zone.Score += 3;
-
-                zones.Add(zone);
+            if (context.M1ShortTrend == "DOWN")
+            {
+                score += 8;
+                analysis.Reasons.Add("M1 qısa trend SHORT istiqamətindədir.");
             }
         }
 
-        return zones
-            .OrderByDescending(x => x.IsFresh)
-            .ThenBy(x => x.AgeCandles)
-            .ThenByDescending(x => x.Score)
-            .FirstOrDefault();
+        return Math.Clamp(score, 0, 38);
     }
 
-    private static bool IsFvgMitigatedBeforeLast(
-        FvgZone zone,
-        List<PriceCandle> candles,
-        string direction)
+    private static BinarySetupModel AnalyzeTrendContinuation(
+        string direction,
+        BinaryMarketContext context)
     {
-        for (var i = zone.CreatedIndex + 1; i < candles.Count - 1; i++)
+        var score = 0;
+        var reasons = new List<string>();
+
+        var recent = context.M1Setup.TakeLast(30).ToList();
+        var last = recent[^1];
+
+        var ma8 = recent.TakeLast(8).Average(x => x.Close);
+        var ma21 = recent.TakeLast(21).Average(x => x.Close);
+
+        var pullbackCandles = recent.TakeLast(8).ToList();
+
+        if (direction == "LONG")
         {
-            if (direction == "LONG" && candles[i].Low <= zone.Low)
-                return true;
+            var trendOk =
+                context.M5Trend != "DOWN" &&
+                context.M1Trend == "UP" &&
+                ma8 >= ma21;
 
-            if (direction == "SHORT" && candles[i].High >= zone.High)
-                return true;
-        }
-
-        return false;
-    }
-
-    private static int CalculateFvgScore(
-        FvgZone zone,
-        double avgRange)
-    {
-        var score = zone.IsFresh
-            ? 20
-            : 8;
-
-        score += zone.AgeCandles switch
-        {
-            <= 5 => 6,
-            <= 15 => 4,
-            <= 30 => 2,
-            _ => 0
-        };
-
-        var size = zone.High - zone.Low;
-
-        if (size <= avgRange * 3)
-            score += 3;
-
-        return Math.Clamp(score, 0, 30);
-    }
-
-    private static ZoneProximity GetFvgProximity(
-        double price,
-        FvgZone zone,
-        double avgRange)
-    {
-        var isInside =
-            price >= zone.Low &&
-            price <= zone.High;
-
-        if (isInside)
-        {
-            return new ZoneProximity
+            if (trendOk)
             {
-                IsInside = true,
-                IsNear = true,
-                IsAcceptable = true,
-                Distance = 0
+                score += 24;
+                reasons.Add("Trend continuation LONG: M1 200 trend yuxarıdır və MA8 MA21 üzərindədir.");
+            }
+
+            var pullback =
+                pullbackCandles.Any(x => x.Low <= ma21 + context.AvgM1Range * 0.45) &&
+                last.Close > ma8 &&
+                last.IsBullish;
+
+            if (pullback)
+            {
+                score += 24;
+                reasons.Add("Trend continuation LONG: MA21 zonasına pullback və bullish reaksiya var.");
+            }
+
+            var invalid = (decimal)recent.TakeLast(12).Min(x => x.Low);
+
+            return new BinarySetupModel
+            {
+                Name = "TREND_CONTINUATION",
+                Direction = direction,
+                Score = Math.Clamp(score, 0, 55),
+                IsConfirmed = score >= 38,
+                InvalidPrice = invalid,
+                Reasons = reasons
+            };
+        }
+        else
+        {
+            var trendOk =
+                context.M5Trend != "UP" &&
+                context.M1Trend == "DOWN" &&
+                ma8 <= ma21;
+
+            if (trendOk)
+            {
+                score += 24;
+                reasons.Add("Trend continuation SHORT: M1 200 trend aşağıdır və MA8 MA21 altındadır.");
+            }
+
+            var pullback =
+                pullbackCandles.Any(x => x.High >= ma21 - context.AvgM1Range * 0.45) &&
+                last.Close < ma8 &&
+                last.IsBearish;
+
+            if (pullback)
+            {
+                score += 24;
+                reasons.Add("Trend continuation SHORT: MA21 zonasına pullback və bearish reaksiya var.");
+            }
+
+            var invalid = (decimal)recent.TakeLast(12).Max(x => x.High);
+
+            return new BinarySetupModel
+            {
+                Name = "TREND_CONTINUATION",
+                Direction = direction,
+                Score = Math.Clamp(score, 0, 55),
+                IsConfirmed = score >= 38,
+                InvalidPrice = invalid,
+                Reasons = reasons
+            };
+        }
+    }
+
+    private static BinarySetupModel AnalyzeSweepReversal(
+        string direction,
+        BinaryMarketContext context)
+    {
+        var score = 0;
+        var reasons = new List<string>();
+
+        var recent = context.M1Setup.TakeLast(80).ToList();
+
+        if (recent.Count < 40)
+        {
+            return new BinarySetupModel
+            {
+                Name = "SWEEP_REVERSAL",
+                Direction = direction,
+                Score = 0,
+                IsConfirmed = false,
+                InvalidPrice = context.LastClose,
+                Reasons = new List<string> { "Sweep reversal üçün kifayət qədər candle yoxdur." }
             };
         }
 
-        var distance = price < zone.Low
-            ? zone.Low - price
-            : price - zone.High;
+        var reference = recent
+            .Take(recent.Count - 5)
+            .TakeLast(45)
+            .ToList();
 
-        var nearLimit = Math.Max(
-            avgRange * 0.75,
-            price * 0.00003);
+        var last8 = recent.TakeLast(8).ToList();
 
-        var acceptableLimit = Math.Max(
-            avgRange * 1.25,
-            price * 0.00005);
+        var keyHigh = reference.Max(x => x.High);
+        var keyLow = reference.Min(x => x.Low);
 
-        return new ZoneProximity
+        if (direction == "LONG")
         {
-            IsInside = false,
-            IsNear = distance <= nearLimit,
-            IsAcceptable = distance <= acceptableLimit,
-            Distance = distance
-        };
+            var sweep = last8
+                .Select((c, index) => new { Candle = c, Index = index })
+                .Where(x =>
+                    x.Candle.Low < keyLow &&
+                    x.Candle.Close > keyLow)
+                .LastOrDefault();
+
+            if (sweep != null)
+            {
+                score += 30;
+                reasons.Add("Sweep reversal LONG: M1 sell-side liquidity sweep və range içinə qayıdış var.");
+
+                if (sweep.Candle.LowerWick >= Math.Max(sweep.Candle.Body * 0.8, context.AvgM1Range * 0.2))
+                {
+                    score += 10;
+                    reasons.Add("Sweep candle bullish rejection verir.");
+                }
+            }
+
+            var bullishShift = HasStructureShift(recent, "LONG");
+
+            if (bullishShift)
+            {
+                score += 15;
+                reasons.Add("Sweep reversal LONG: M1 bullish structure shift var.");
+            }
+
+            return new BinarySetupModel
+            {
+                Name = "SWEEP_REVERSAL",
+                Direction = direction,
+                Score = Math.Clamp(score, 0, 55),
+                IsConfirmed = score >= 38,
+                InvalidPrice = (decimal)keyLow,
+                Reasons = reasons
+            };
+        }
+        else
+        {
+            var sweep = last8
+                .Select((c, index) => new { Candle = c, Index = index })
+                .Where(x =>
+                    x.Candle.High > keyHigh &&
+                    x.Candle.Close < keyHigh)
+                .LastOrDefault();
+
+            if (sweep != null)
+            {
+                score += 30;
+                reasons.Add("Sweep reversal SHORT: M1 buy-side liquidity sweep və range içinə qayıdış var.");
+
+                if (sweep.Candle.UpperWick >= Math.Max(sweep.Candle.Body * 0.8, context.AvgM1Range * 0.2))
+                {
+                    score += 10;
+                    reasons.Add("Sweep candle bearish rejection verir.");
+                }
+            }
+
+            var bearishShift = HasStructureShift(recent, "SHORT");
+
+            if (bearishShift)
+            {
+                score += 15;
+                reasons.Add("Sweep reversal SHORT: M1 bearish structure shift var.");
+            }
+
+            return new BinarySetupModel
+            {
+                Name = "SWEEP_REVERSAL",
+                Direction = direction,
+                Score = Math.Clamp(score, 0, 55),
+                IsConfirmed = score >= 38,
+                InvalidPrice = (decimal)keyHigh,
+                Reasons = reasons
+            };
+        }
     }
 
-    private static (bool IsConfirmed, string Reason) HasM1Confirmation(
-        List<PriceCandle> candles,
-        string direction)
+    private static BinarySetupModel AnalyzeBreakoutRetest(
+        string direction,
+        BinaryMarketContext context)
+    {
+        var score = 0;
+        var reasons = new List<string>();
+
+        var recent = context.M1Setup.TakeLast(50).ToList();
+        var last = recent[^1];
+
+        var reference = recent
+            .Take(recent.Count - 5)
+            .TakeLast(30)
+            .ToList();
+
+        var high = reference.Max(x => x.High);
+        var low = reference.Min(x => x.Low);
+
+        if (direction == "LONG")
+        {
+            var breakout = recent
+                .TakeLast(8)
+                .Any(x => x.Close > high);
+
+            if (breakout)
+            {
+                score += 24;
+                reasons.Add("Breakout retest LONG: son M1 range high breakout olub.");
+            }
+
+            var retest =
+                last.Low <= high + context.AvgM1Range * 0.55 &&
+                last.Close > high &&
+                last.IsBullish;
+
+            if (retest)
+            {
+                score += 24;
+                reasons.Add("Breakout retest LONG: breakout level retest və bullish bağlanış var.");
+            }
+
+            return new BinarySetupModel
+            {
+                Name = "BREAKOUT_RETEST",
+                Direction = direction,
+                Score = Math.Clamp(score, 0, 50),
+                IsConfirmed = score >= 38,
+                InvalidPrice = (decimal)high,
+                Reasons = reasons
+            };
+        }
+        else
+        {
+            var breakout = recent
+                .TakeLast(8)
+                .Any(x => x.Close < low);
+
+            if (breakout)
+            {
+                score += 24;
+                reasons.Add("Breakout retest SHORT: son M1 range low breakout olub.");
+            }
+
+            var retest =
+                last.High >= low - context.AvgM1Range * 0.55 &&
+                last.Close < low &&
+                last.IsBearish;
+
+            if (retest)
+            {
+                score += 24;
+                reasons.Add("Breakout retest SHORT: breakout level retest və bearish bağlanış var.");
+            }
+
+            return new BinarySetupModel
+            {
+                Name = "BREAKOUT_RETEST",
+                Direction = direction,
+                Score = Math.Clamp(score, 0, 50),
+                IsConfirmed = score >= 38,
+                InvalidPrice = (decimal)low,
+                Reasons = reasons
+            };
+        }
+    }
+
+    private static (bool IsConfirmed, string Reason) HasPriceActionConfirmation(
+        string direction,
+        List<PriceCandle> candles)
     {
         if (candles.Count < 3)
-            return (false, "M1 confirmation ucun kifayet qeder candle yoxdur.");
+            return (false, "Price action üçün kifayət qədər candle yoxdur.");
 
         var previous = candles[^2];
         var last = candles[^1];
 
         if (last.Range <= 0)
-            return (false, "Son M1 candle range sifirdir.");
+            return (false, "Son M1 candle range sıfırdır.");
 
         var closePosition = (last.Close - last.Low) / last.Range;
 
@@ -847,10 +1018,10 @@ public class CoreBinarySignalService : ISmartSignalService
         {
             var bullishRejection =
                 last.IsBullish &&
-                last.LowerWick >= last.Body * 0.70 &&
+                last.LowerWick >= Math.Max(last.Body * 0.65, last.Range * 0.25) &&
                 closePosition >= 0.55;
 
-            var bullishEngulfing =
+            var bullishEngulf =
                 previous.IsBearish &&
                 last.IsBullish &&
                 last.Close > previous.Open;
@@ -859,321 +1030,223 @@ public class CoreBinarySignalService : ISmartSignalService
                 last.IsBullish &&
                 last.Close > previous.High;
 
-            if (bullishRejection || bullishEngulfing || bullishBreak)
-                return (true, "M1 bullish confirmation/rejection var.");
+            if (bullishRejection || bullishEngulf || bullishBreak)
+                return (true, "M1 bullish price action confirmation var.");
 
-            return (false, "M1 bullish confirmation hele yoxdur.");
+            return (false, "M1 bullish price action confirmation yoxdur.");
         }
+        else
+        {
+            var bearishRejection =
+                last.IsBearish &&
+                last.UpperWick >= Math.Max(last.Body * 0.65, last.Range * 0.25) &&
+                closePosition <= 0.45;
 
-        var bearishRejection =
-            last.IsBearish &&
-            last.UpperWick >= last.Body * 0.70 &&
-            closePosition <= 0.45;
+            var bearishEngulf =
+                previous.IsBullish &&
+                last.IsBearish &&
+                last.Close < previous.Open;
 
-        var bearishEngulfing =
-            previous.IsBullish &&
-            last.IsBearish &&
-            last.Close < previous.Open;
+            var bearishBreak =
+                last.IsBearish &&
+                last.Close < previous.Low;
 
-        var bearishBreak =
-            last.IsBearish &&
-            last.Close < previous.Low;
+            if (bearishRejection || bearishEngulf || bearishBreak)
+                return (true, "M1 bearish price action confirmation var.");
 
-        if (bearishRejection || bearishEngulfing || bearishBreak)
-            return (true, "M1 bearish confirmation/rejection var.");
-
-        return (false, "M1 bearish confirmation hele yoxdur.");
+            return (false, "M1 bearish price action confirmation yoxdur.");
+        }
     }
 
-    private static bool IsEntryClean(
-        PriceCandle last,
-        FvgZone fvg,
+    private static bool HasStructureShift(
+        List<PriceCandle> candles,
+        string direction)
+    {
+        if (candles.Count < 25)
+            return false;
+
+        var previous = candles
+            .Take(candles.Count - 3)
+            .TakeLast(20)
+            .ToList();
+
+        var last = candles[^1];
+
+        if (direction == "LONG")
+        {
+            var high = previous.Max(x => x.High);
+            return last.Close > high;
+        }
+
+        var low = previous.Min(x => x.Low);
+        return last.Close < low;
+    }
+
+    private static bool HasDirectionConflict(
+        string direction,
+        BinaryMarketContext context)
+    {
+        if (direction == "LONG")
+        {
+            return context.M5Trend == "DOWN" &&
+                   context.M1Trend == "DOWN";
+        }
+
+        return context.M5Trend == "UP" &&
+               context.M1Trend == "UP";
+    }
+
+    private static int CalculateExpiry(
+        string direction,
+        BinaryMarketContext context,
+        BinaryDirectionAnalysis analysis,
+        BinarySetupModel model)
+    {
+        var recent = context.M1Setup.TakeLast(12).ToList();
+
+        var directional = direction == "LONG"
+            ? recent.Count(x => x.IsBullish)
+            : recent.Count(x => x.IsBearish);
+
+        var opposite = direction == "LONG"
+            ? recent.Count(x => x.IsBearish)
+            : recent.Count(x => x.IsBullish);
+
+        var lastMove = Math.Abs(recent[^1].Close - recent[0].Close);
+        var impulseRatio = context.AvgM1Range > 0
+            ? lastMove / context.AvgM1Range
+            : 0;
+
+        var minutes = model.Name switch
+        {
+            "TREND_CONTINUATION" => 12,
+            "SWEEP_REVERSAL" => 7,
+            "BREAKOUT_RETEST" => 9,
+            _ => 10
+        };
+
+        if (analysis.Confidence >= 92)
+            minutes -= 2;
+        else if (analysis.Confidence >= 85)
+            minutes -= 1;
+        else if (analysis.Confidence < 80)
+            minutes += 3;
+
+        if (directional >= 8 && impulseRatio >= 3.0)
+            minutes -= 2;
+        else if (directional >= 7)
+            minutes -= 1;
+
+        if (opposite >= 6)
+            minutes += 2;
+
+        if (context.VolatilityState == "LOW")
+            minutes += 5;
+
+        if (context.VolatilityState == "HIGH")
+            minutes -= 2;
+
+        if (context.IsChoppy)
+            minutes += 3;
+
+        return Math.Clamp(minutes, 3, 25);
+    }
+
+    private static string DetectTrend(
+        List<PriceCandle> candles,
+        int lookback)
+    {
+        var recent = candles
+            .TakeLast(lookback)
+            .ToList();
+
+        if (recent.Count < 25)
+            return "NEUTRAL";
+
+        var first = recent.First();
+        var last = recent.Last();
+
+        var avgRange = AverageRange(recent);
+
+        if (avgRange <= 0)
+            return "NEUTRAL";
+
+        var fast = recent.TakeLast(9).Average(x => x.Close);
+        var slow = recent.TakeLast(26).Average(x => x.Close);
+
+        var bullishCount = recent.TakeLast(12).Count(x => x.IsBullish);
+        var bearishCount = recent.TakeLast(12).Count(x => x.IsBearish);
+
+        var netMove = last.Close - first.Close;
+
+        if (fast > slow &&
+            netMove > avgRange * 1.2 &&
+            bullishCount >= 6)
+        {
+            return "UP";
+        }
+
+        if (fast < slow &&
+            netMove < -avgRange * 1.2 &&
+            bearishCount >= 6)
+        {
+            return "DOWN";
+        }
+
+        return "NEUTRAL";
+    }
+
+    private static string DetectVolatilityState(
+        List<PriceCandle> candles,
         double avgRange)
     {
-        var middle = (fvg.Low + fvg.High) / 2.0;
-        var distance = Math.Abs(last.Close - middle);
+        if (candles.Count < 30)
+            return "UNKNOWN";
 
-        return distance <= avgRange * 3.0;
-    }
+        var lastClose = candles[^1].Close;
 
-    private static (int Minutes, string Reason) CalculateExpiry(
-        string direction,
-        List<PriceCandle> m1,
-        SweepInfo sweep,
-        FvgZone fvg,
-        ZoneProximity proximity,
-        double avgRange,
-        int confidence,
-        bool hasConfirmation,
-        bool entryClean)
-    {
-        var reasons = new List<string>();
-        var last = m1[^1];
+        if (lastClose <= 0 || avgRange <= 0)
+            return "UNKNOWN";
 
-        if (avgRange <= 0 || last.Close <= 0)
-        {
-            return (
-                Minutes: 7,
-                Reason: "Expiry default 7 deqiqe secildi: volatility hesablanmadi.");
-        }
-
-        var recent5 = m1.TakeLast(5).ToList();
-        var recent10 = m1.TakeLast(10).ToList();
-        var recent20 = m1.TakeLast(20).ToList();
-
-        var minutes = 10;
-
-        var volatilityPercent = avgRange / last.Close * 100.0;
-
-        var move3 = m1.Count >= 4
-            ? Math.Abs(m1[^1].Close - m1[^4].Close)
-            : 0;
-
-        var move7 = m1.Count >= 8
-            ? Math.Abs(m1[^1].Close - m1[^8].Close)
-            : 0;
-
-        var impulseRatio3 = avgRange > 0
-            ? move3 / avgRange
-            : 0;
-
-        var impulseRatio7 = avgRange > 0
-            ? move7 / avgRange
-            : 0;
-
-        var directional5 = direction == "LONG"
-            ? recent5.Count(x => x.IsBullish)
-            : recent5.Count(x => x.IsBearish);
-
-        var opposite5 = direction == "LONG"
-            ? recent5.Count(x => x.IsBearish)
-            : recent5.Count(x => x.IsBullish);
-
-        var recentAvgRange = AverageRange(recent10);
-        var olderAvgRange = AverageRange(recent20.Take(10).ToList());
-
-        var volatilityRatio = olderAvgRange > 0
-            ? recentAvgRange / olderAvgRange
-            : 1.0;
-
-        if (confidence >= 94 && sweep.AgeCandles <= 5 && fvg.AgeCandles <= 6 && hasConfirmation)
-        {
-            minutes -= 4;
-            reasons.Add("Cox guclu ve teze setup var, qisa expiry uygundur.");
-        }
-        else if (confidence >= 88 && sweep.AgeCandles <= 12 && fvg.AgeCandles <= 15)
-        {
-            minutes -= 2;
-            reasons.Add("Guclu setup var, qisa-orta expiry secildi.");
-        }
-        else if (confidence < 86)
-        {
-            minutes += 3;
-            reasons.Add("Confidence minimuma yaxindir, qiymete daha cox vaxt verildi.");
-        }
-
-        if (proximity.IsInside)
-        {
-            minutes -= 1;
-            reasons.Add("Price FVG entry zone icindedir, entry yaxindir.");
-        }
-        else if (proximity.IsNear)
-        {
-            minutes += 1;
-            reasons.Add("Price FVG yaxinligindadir, orta expiry secildi.");
-        }
-        else
-        {
-            minutes += 3;
-            reasons.Add("Price FVG-den bir az uzaqdir, daha uzun expiry lazim ola biler.");
-        }
-
-        if (hasConfirmation)
-        {
-            minutes -= 2;
-            reasons.Add("M1 confirmation var, hereket daha tez isleye biler.");
-        }
-        else
-        {
-            minutes += 2;
-            reasons.Add("M1 confirmation zeifdir, trade-a daha cox vaxt verildi.");
-        }
-
-        if (directional5 >= 4 && impulseRatio3 >= 2.0)
-        {
-            minutes -= 3;
-            reasons.Add("Son M1 candle-larda istiqametli impulse gucludur, qisa expiry secildi.");
-        }
-        else if (directional5 >= 3)
-        {
-            minutes -= 1;
-            reasons.Add("Son M1 candle-lar direction-i destekleyir.");
-        }
-        else if (directional5 <= 2)
-        {
-            minutes += 3;
-            reasons.Add("M1 direction hele yavasdir, expiry uzadildi.");
-        }
-
-        if (opposite5 >= 3)
-        {
-            minutes += 2;
-            reasons.Add("Son candle-larda qarisiq hereket var, expiry bir az uzadildi.");
-        }
+        var volatilityPercent = avgRange / lastClose * 100.0;
 
         if (volatilityPercent < 0.006)
-        {
-            minutes += 8;
-            reasons.Add("Volatility cox zeifdir, maksimuma yaxin uzun expiry lazimdir.");
-        }
-        else if (volatilityPercent < 0.012)
-        {
-            minutes += 5;
-            reasons.Add("Volatility zeifdir, daha uzun expiry secildi.");
-        }
-        else if (volatilityPercent < 0.020)
-        {
-            minutes += 2;
-            reasons.Add("Volatility sakitdir, orta-uzun expiry secildi.");
-        }
-        else if (volatilityPercent > 0.055)
-        {
-            minutes -= 3;
-            reasons.Add("Volatility yuksekdir, qisa expiry daha uygundur.");
-        }
-        else if (volatilityPercent > 0.038)
-        {
-            minutes -= 2;
-            reasons.Add("Volatility aktivdir, qisa-orta expiry secildi.");
-        }
+            return "LOW";
 
-        if (volatilityRatio < 0.70)
-        {
-            minutes += 3;
-            reasons.Add("Son M1 volatility evvelkinden zeifdir, qiymete elave vaxt verildi.");
-        }
-        else if (volatilityRatio > 1.40)
-        {
-            minutes -= 2;
-            reasons.Add("Son M1 volatility artib, hereket daha tez netice vere biler.");
-        }
+        if (volatilityPercent > 0.075)
+            return "HIGH";
 
-        if (sweep.AgeCandles <= 3)
-        {
-            minutes -= 2;
-            reasons.Add("Sweep cox tezedir.");
-        }
-        else if (sweep.AgeCandles <= 10)
-        {
-            reasons.Add("Sweep tezedir.");
-        }
-        else if (sweep.AgeCandles <= 20)
-        {
-            minutes += 2;
-            reasons.Add("Sweep bir az vaxt kecib, expiry uzadildi.");
-        }
-        else
-        {
-            minutes += 5;
-            reasons.Add("Sweep kohnelemeye baslayib, hereket ucun daha genis vaxt verildi.");
-        }
-
-        if (fvg.AgeCandles <= 3)
-        {
-            minutes -= 1;
-            reasons.Add("FVG cox tezedir.");
-        }
-        else if (fvg.AgeCandles <= 12)
-        {
-            reasons.Add("FVG aktiv ve tezedir.");
-        }
-        else if (fvg.AgeCandles <= 25)
-        {
-            minutes += 2;
-            reasons.Add("FVG bir az kohneleib, expiry uzadildi.");
-        }
-        else
-        {
-            minutes += 4;
-            reasons.Add("FVG kohne zone-dur, daha uzun expiry secildi.");
-        }
-
-        if (!entryClean)
-        {
-            minutes += 4;
-            reasons.Add("Entry gecikmis ola biler, buna gore expiry uzadildi.");
-        }
-        else
-        {
-            reasons.Add("Entry temizdir, price FVG-den cox uzaqlasmayib.");
-        }
-
-        if (impulseRatio7 >= 4.5 && directional5 >= 4)
-        {
-            minutes += 2;
-            reasons.Add("Move artiq xeyli gedib, pullback riski ucun expiry bir az uzadildi.");
-        }
-
-        minutes = ClampToAllowedExpiry(minutes);
-
-        return (
-            Minutes: minutes,
-            Reason:
-                $"Smart binary expiry: {minutes} deqiqe secildi. " +
-                string.Join(" ", reasons.Distinct()));
+        return "NORMAL";
     }
 
-    private static List<SwingPoint> FindSwings(
-        List<PriceCandle> candles,
-        int left,
-        int right)
+    private static bool DetectChoppyMarket(
+        List<PriceCandle> candles)
     {
-        var swings = new List<SwingPoint>();
+        var recent = candles.TakeLast(24).ToList();
 
-        if (candles.Count < left + right + 1)
-            return swings;
+        if (recent.Count < 20)
+            return false;
 
-        for (var i = left; i < candles.Count - right; i++)
+        var directionChanges = 0;
+
+        for (var i = 1; i < recent.Count; i++)
         {
-            var isHigh = true;
-            var isLow = true;
+            var previous = recent[i - 1].Close >= recent[i - 1].Open ? 1 : -1;
+            var current = recent[i].Close >= recent[i].Open ? 1 : -1;
 
-            for (var j = i - left; j <= i + right; j++)
-            {
-                if (j == i)
-                    continue;
-
-                if (candles[i].High <= candles[j].High)
-                    isHigh = false;
-
-                if (candles[i].Low >= candles[j].Low)
-                    isLow = false;
-            }
-
-            if (isHigh)
-            {
-                swings.Add(new SwingPoint
-                {
-                    Index = i,
-                    TimeUtc = candles[i].TimeUtc,
-                    Price = candles[i].High,
-                    Kind = "HIGH"
-                });
-            }
-
-            if (isLow)
-            {
-                swings.Add(new SwingPoint
-                {
-                    Index = i,
-                    TimeUtc = candles[i].TimeUtc,
-                    Price = candles[i].Low,
-                    Kind = "LOW"
-                });
-            }
+            if (previous != current)
+                directionChanges++;
         }
 
-        return swings;
+        var avgRange = AverageRange(recent);
+
+        if (avgRange <= 0)
+            return false;
+
+        var totalMove = Math.Abs(recent[^1].Close - recent[0].Close);
+        var moveRatio = totalMove / avgRange;
+
+        return directionChanges >= 16 && moveRatio <= 2.5;
     }
 
     private static SmartTradeSignal Wait(
@@ -1194,13 +1267,13 @@ public class CoreBinarySignalService : ISmartSignalService
         if (longAnalysis != null)
         {
             reasons.Add($"LONG score: {longAnalysis.Confidence}%");
-            reasons.AddRange(longAnalysis.Reasons.Take(6));
+            reasons.AddRange(longAnalysis.Reasons.Take(8));
         }
 
         if (shortAnalysis != null)
         {
             reasons.Add($"SHORT score: {shortAnalysis.Confidence}%");
-            reasons.AddRange(shortAnalysis.Reasons.Take(6));
+            reasons.AddRange(shortAnalysis.Reasons.Take(8));
         }
 
         var sideAnalyses = new List<SideAnalysis>();
@@ -1238,13 +1311,14 @@ public class CoreBinarySignalService : ISmartSignalService
             ValidForSeconds = 0,
             LastClose = lastClose,
             InvalidIf = string.Empty,
-            Reasons = reasons,
+            Reasons = reasons.Distinct().ToList(),
             SideAnalyses = sideAnalyses,
             CreatedAtUtc = DateTime.UtcNow
         };
     }
 
-    private static List<PriceCandle> MapCandles(TwelveDataResponse? response)
+    private static List<PriceCandle> MapCandles(
+        TwelveDataResponse? response)
     {
         if (response?.Values == null)
             return new List<PriceCandle>();
@@ -1294,7 +1368,8 @@ public class CoreBinarySignalService : ISmartSignalService
         return Math.Round(price, digits);
     }
 
-    private static int GetDigits(string symbol)
+    private static int GetDigits(
+        string symbol)
     {
         symbol = symbol.ToUpperInvariant();
 
@@ -1313,7 +1388,8 @@ public class CoreBinarySignalService : ISmartSignalService
         return 5;
     }
 
-    private static string GetGrade(int confidence)
+    private static string GetGrade(
+        int confidence)
     {
         if (confidence >= 92)
             return "A+";
@@ -1321,23 +1397,46 @@ public class CoreBinarySignalService : ISmartSignalService
         if (confidence >= 85)
             return "A";
 
-        if (confidence >= 75)
+        if (confidence >= 77)
             return "B";
 
         return "NO_TRADE";
     }
 
-    private static int ClampToAllowedExpiry(int minutes)
-    {
-        return Math.Clamp(minutes, 3, 25);
-    }
-
-    private static double AverageRange(List<PriceCandle> candles)
+    private static double AverageRange(
+        List<PriceCandle> candles)
     {
         if (candles.Count == 0)
             return 0;
 
         return candles.Average(x => x.Range);
+    }
+
+    private sealed class BinaryMarketContext
+    {
+        public string Symbol { get; set; } = string.Empty;
+
+        public List<PriceCandle> M5 { get; set; } = new();
+
+        public List<PriceCandle> M1Setup { get; set; } = new();
+
+        public List<PriceCandle> M1TrendCandles { get; set; } = new();
+
+        public decimal LastClose { get; set; }
+
+        public double AvgM5Range { get; set; }
+
+        public double AvgM1Range { get; set; }
+
+        public string M5Trend { get; set; } = "NEUTRAL";
+
+        public string M1Trend { get; set; } = "NEUTRAL";
+
+        public string M1ShortTrend { get; set; } = "NEUTRAL";
+
+        public string VolatilityState { get; set; } = "UNKNOWN";
+
+        public bool IsChoppy { get; set; }
     }
 
     private sealed class BinaryDirectionAnalysis
@@ -1348,19 +1447,9 @@ public class CoreBinarySignalService : ISmartSignalService
 
         public bool TradeReady { get; set; }
 
-        public bool HasLiquidity { get; set; }
+        public bool HasModelConfirmation { get; set; }
 
-        public bool HasSweep { get; set; }
-
-        public bool HasReturnInside { get; set; }
-
-        public bool HasFvg { get; set; }
-
-        public bool IsFvgFresh { get; set; }
-
-        public bool IsPriceNearFvg { get; set; }
-
-        public bool HasConfirmation { get; set; }
+        public bool HasPriceAction { get; set; }
 
         public decimal EntryPrice { get; set; }
 
@@ -1370,76 +1459,26 @@ public class CoreBinarySignalService : ISmartSignalService
 
         public string ExpiryReason { get; set; } = string.Empty;
 
+        public string ModelName { get; set; } = string.Empty;
+
         public List<string> Reasons { get; set; } = new();
 
         public string DebugSummary =>
-            $"Liquidity={HasLiquidity}, Sweep={HasSweep}, Return={HasReturnInside}, FVG={HasFvg}, Fresh={IsFvgFresh}, NearFVG={IsPriceNearFvg}, Confirm={HasConfirmation}, Ready={TradeReady}";
+            $"Model={ModelName}, ModelOk={HasModelConfirmation}, PA={HasPriceAction}, Ready={TradeReady}";
     }
 
-    private sealed class LiquidityLevel
+    private sealed class BinarySetupModel
     {
-        public string Side { get; set; } = string.Empty;
+        public string Name { get; set; } = string.Empty;
 
-        public double Price { get; set; }
+        public string Direction { get; set; } = string.Empty;
 
-        public DateTime TimeUtc { get; set; }
+        public int Score { get; set; }
 
-        public int Strength { get; set; }
+        public bool IsConfirmed { get; set; }
+
+        public decimal InvalidPrice { get; set; }
 
         public List<string> Reasons { get; set; } = new();
-    }
-
-    private sealed class SweepInfo
-    {
-        public PriceCandle Candle { get; set; } = new();
-
-        public int CandleIndex { get; set; }
-
-        public int ReturnInsideIndex { get; set; }
-
-        public LiquidityLevel Level { get; set; } = new();
-
-        public int AgeCandles { get; set; }
-
-        public int Score { get; set; }
-    }
-
-    private sealed class FvgZone
-    {
-        public double Low { get; set; }
-
-        public double High { get; set; }
-
-        public int CreatedIndex { get; set; }
-
-        public DateTime CreatedAtUtc { get; set; }
-
-        public int AgeCandles { get; set; }
-
-        public bool IsFresh { get; set; }
-
-        public int Score { get; set; }
-    }
-
-    private sealed class SwingPoint
-    {
-        public int Index { get; set; }
-
-        public DateTime TimeUtc { get; set; }
-
-        public double Price { get; set; }
-
-        public string Kind { get; set; } = string.Empty;
-    }
-
-    private sealed class ZoneProximity
-    {
-        public bool IsInside { get; set; }
-
-        public bool IsNear { get; set; }
-
-        public bool IsAcceptable { get; set; }
-
-        public double Distance { get; set; }
     }
 }
