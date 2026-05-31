@@ -22,10 +22,9 @@
     "AUD/CAD"
   ],
   "forexEnabled": true,
-  "forexActiveSymbol": "USD/CAD",
+  "forexActiveSymbol": "BTC/USD",
   "forexActiveSymbols": [
-    "USD/CAD",
-    "CHF/JPY"
+    "BTC/USD"
   ],
   "forexSymbols": [
     "GBP/JPY",
@@ -61,5 +60,5 @@
   "mt5MaxTradesPerDay": 20,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-28T08:55:44.8038361Z"
+  "updatedAtUtc": "2026-05-30T21:44:11.357096Z"
 }

@@ -229,6 +229,47 @@ public class CoreForexSignalService : IForexSignalService
         var m15Structure = DetectStructure(m15);
         var m5Structure = DetectStructure(m5);
 
+        // === V2: Higher-Timeframe bias (M15 EMA + slope) ===
+        var htfBias = GetHtfBias(m15);
+
+        if (direction == "LONG")
+        {
+            if (htfBias == "UP")
+            {
+                analysis.Confidence += 12;
+                reasons.Add("HTF bias (M15) LONG istiqamətini güclü dəstəkləyir.");
+            }
+            else if (htfBias == "DOWN")
+            {
+                analysis.Confidence -= 15;
+                reasons.Add("HTF bias (M15) DOWN-dadır — LONG trendə qarşıdır, cəza tətbiq edildi.");
+            }
+            else
+            {
+                reasons.Add("HTF bias (M15) neytraldır.");
+            }
+        }
+        else
+        {
+            if (htfBias == "DOWN")
+            {
+                analysis.Confidence += 12;
+                reasons.Add("HTF bias (M15) SHORT istiqamətini güclü dəstəkləyir.");
+            }
+            else if (htfBias == "UP")
+            {
+                analysis.Confidence -= 15;
+                reasons.Add("HTF bias (M15) UP-dadır — SHORT trendə qarşıdır, cəza tətbiq edildi.");
+            }
+            else
+            {
+                reasons.Add("HTF bias (M15) neytraldır.");
+            }
+        }
+
+        // HTF bias-ı analizdə saxlayırıq ki, TradeReady-də istifadə edək.
+        analysis.HtfBias = htfBias;
+
         if (direction == "LONG")
         {
             if (m15Structure == "BULLISH")
@@ -427,12 +468,19 @@ public class CoreForexSignalService : IForexSignalService
             0,
             100);
 
+        // === V2: Trendə tam qarşı setupları blokla ===
+        // HTF güclü əks istiqamətdədirsə (DOWN-da LONG, UP-da SHORT), trade açma.
+        var againstHtf =
+            (direction == "LONG" && analysis.HtfBias == "DOWN") ||
+            (direction == "SHORT" && analysis.HtfBias == "UP");
+
         analysis.TradeReady =
            analysis.HasBreakerBlock &&
            analysis.HasBodyBreak &&
            analysis.HasStructureShift &&
            analysis.HasRetest &&
            analysis.IsRiskPlanValid &&
+           !againstHtf &&
            (
                analysis.HasReaction ||
                analysis.HasFvgOverlap
@@ -441,6 +489,9 @@ public class CoreForexSignalService : IForexSignalService
 
         if (!analysis.TradeReady)
         {
+            if (againstHtf)
+                reasons.Add("No trade: setup HTF (M15) trendinə qarşıdır.");
+
             if (!analysis.HasBodyBreak)
                 reasons.Add("No trade: body break yoxdur.");
 
@@ -885,10 +936,17 @@ public class CoreForexSignalService : IForexSignalService
         string symbol,
         List<PriceCandle> candles)
     {
-        var avgRange = AverageRange(
-            candles.TakeLast(20).ToList());
+        // ATR(14) əsaslı dinamik buffer — gap və wick-ləri nəzərə alır,
+        // ona görə sabit avgRange-dən daha dəqiqdir.
+        var atr = CalculateAtr(candles, 14);
 
-        var buffer = (decimal)(avgRange * 1.2);
+        // Fallback: ATR hesablanmadısa köhnə avgRange üsuluna keç.
+        if (atr <= 0)
+            atr = AverageRange(candles.TakeLast(20).ToList());
+
+        // SL üçün ATR-in yarısı kifayət buffer-dir (stop hunt-dan qoruyur,
+        // amma çox geniş deyil ki, risk/reward pozulmasın).
+        var buffer = (decimal)(atr * 0.5);
 
         symbol = symbol.ToUpperInvariant();
 
@@ -902,6 +960,129 @@ public class CoreForexSignalService : IForexSignalService
             return Math.Max(buffer, 0.08m);
 
         return Math.Max(buffer, 0.0003m);
+    }
+
+    // ==================== V2: HTF BIAS + ATR (müstəqil, xarici asılılıq yoxdur) ====================
+
+    /// <summary>
+    /// ATR (Average True Range) — Wilder smoothing. Bu fayla məxsus müstəqil hesablama.
+    /// </summary>
+    private static double CalculateAtr(
+        List<PriceCandle> candles,
+        int period)
+    {
+        if (candles.Count < period + 1)
+            return 0;
+
+        var take = Math.Min(period * 4, candles.Count);
+        var data = candles.Skip(candles.Count - take).ToList();
+
+        var trs = new List<double>();
+        for (var i = 1; i < data.Count; i++)
+        {
+            var high = data[i].High;
+            var low = data[i].Low;
+            var prevClose = data[i - 1].Close;
+
+            var tr = Math.Max(
+                high - low,
+                Math.Max(Math.Abs(high - prevClose), Math.Abs(low - prevClose)));
+
+            trs.Add(tr);
+        }
+
+        if (trs.Count < period)
+            return trs.Count > 0 ? trs.Average() : 0;
+
+        var atr = trs.Take(period).Average();
+        for (var i = period; i < trs.Count; i++)
+            atr = (atr * (period - 1) + trs[i]) / period;
+
+        return atr;
+    }
+
+    /// <summary>
+    /// EMA — bu fayla məxsus müstəqil hesablama.
+    /// </summary>
+    private static double CalculateEma(
+        List<PriceCandle> candles,
+        int period)
+    {
+        if (candles.Count == 0 || period <= 0)
+            return 0;
+
+        var take = Math.Min(period * 3, candles.Count);
+        var data = candles.Skip(candles.Count - take).ToList();
+
+        var multiplier = 2.0 / (period + 1);
+
+        var seedCount = Math.Min(period, data.Count);
+        var ema = data.Take(seedCount).Average(x => x.Close);
+
+        for (var i = seedCount; i < data.Count; i++)
+            ema = (data[i].Close - ema) * multiplier + ema;
+
+        return ema;
+    }
+
+    /// <summary>
+    /// Normallaşdırılmış linear regression slope (ATR vahidində).
+    /// Müsbət = yüksələn, mənfi = enən. Trendin GÜCÜNÜ ölçür.
+    /// </summary>
+    private static double CalculateNormalizedSlope(
+        List<PriceCandle> candles,
+        int period,
+        double atr)
+    {
+        if (candles.Count < period || period < 2 || atr <= 0)
+            return 0;
+
+        var data = candles.Skip(candles.Count - period).ToList();
+        var n = data.Count;
+
+        double sumX = 0, sumY = 0, sumXy = 0, sumXx = 0;
+        for (var i = 0; i < n; i++)
+        {
+            double x = i;
+            var y = data[i].Close;
+            sumX += x;
+            sumY += y;
+            sumXy += x * y;
+            sumXx += x * x;
+        }
+
+        var denom = n * sumXx - sumX * sumX;
+        if (denom == 0)
+            return 0;
+
+        var slope = (n * sumXy - sumX * sumY) / denom;
+        return slope / atr;
+    }
+
+    /// <summary>
+    /// M15 əsaslı Higher-Timeframe bias: UP / DOWN / NEUTRAL.
+    /// EMA(20) vs EMA(50) + slope birləşməsi ilə trendin əsl istiqamətini verir.
+    /// </summary>
+    private static string GetHtfBias(
+        List<PriceCandle> m15)
+    {
+        if (m15.Count < 55)
+            return "NEUTRAL";
+
+        var emaFast = CalculateEma(m15, 20);
+        var emaSlow = CalculateEma(m15, 50);
+        var atr = CalculateAtr(m15, 14);
+        var slope = CalculateNormalizedSlope(m15, 20, atr);
+
+        // Güclü yüksələn: fast > slow VƏ slope müsbət
+        if (emaFast > emaSlow && slope > 0.02)
+            return "UP";
+
+        // Güclü enən: fast < slow VƏ slope mənfi
+        if (emaFast < emaSlow && slope < -0.02)
+            return "DOWN";
+
+        return "NEUTRAL";
     }
 
     private static void ApplyRiskPlan(
@@ -1320,6 +1501,8 @@ public class CoreForexSignalService : IForexSignalService
 
         public bool IsRiskPlanValid { get; set; }
 
+        public string HtfBias { get; set; } = "NEUTRAL";
+
         public double ZoneLow { get; set; }
 
         public double ZoneHigh { get; set; }
@@ -1351,7 +1534,7 @@ public class CoreForexSignalService : IForexSignalService
         public List<string> Reasons { get; set; } = new();
 
         public string DebugSummary =>
-            $"Breaker={HasBreakerBlock}, BodyBreak={HasBodyBreak}, MSS={HasStructureShift}, Fresh={IsFresh}, FVG={HasFvgOverlap}, Retest={HasRetest}, Reaction={HasReaction}, Risk={IsRiskPlanValid}, Ready={TradeReady}";
+            $"Breaker={HasBreakerBlock}, BodyBreak={HasBodyBreak}, MSS={HasStructureShift}, Fresh={IsFresh}, FVG={HasFvgOverlap}, Retest={HasRetest}, Reaction={HasReaction}, Risk={IsRiskPlanValid}, HTF={HtfBias}, Ready={TradeReady}";
     }
 
     private sealed class BreakerBlock

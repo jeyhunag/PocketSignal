@@ -9,7 +9,7 @@ namespace PocketSignal.Api.Services.Binary;
 
 public class CoreBinarySignalService : ISmartSignalService
 {
-    private const int MinimumConfidence = 77;
+    private const int MinimumConfidence = 70;
     private const int ConflictScoreDistance = 10;
 
     private const int M5Candles = 80;
@@ -17,11 +17,11 @@ public class CoreBinarySignalService : ISmartSignalService
     private const int M1CandlesForTrend = 200;
 
     private static readonly TimeSpan WinSymbolCooldown = TimeSpan.FromMinutes(7);
-    private static readonly TimeSpan LossSymbolCooldown = TimeSpan.FromMinutes(20);
+    private static readonly TimeSpan LossSymbolCooldown = TimeSpan.FromMinutes(12);
     private static readonly TimeSpan DrawSymbolCooldown = TimeSpan.FromMinutes(5);
-    private static readonly TimeSpan SameDirectionCooldown = TimeSpan.FromMinutes(15);
+    private static readonly TimeSpan SameDirectionCooldown = TimeSpan.FromMinutes(12);
     private static readonly TimeSpan SameSetupCooldown = TimeSpan.FromMinutes(20);
-    private static readonly TimeSpan AfterTwoLossGlobalCooldown = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan AfterTwoLossGlobalCooldown = TimeSpan.FromMinutes(15);
 
     private readonly IMarketDataService _marketDataService;
     private readonly ISignalResultTracker _signalResultTracker;
@@ -530,6 +530,16 @@ public class CoreBinarySignalService : ISmartSignalService
         analysis.InvalidPrice = bestModel.InvalidPrice;
         analysis.EntryPrice = context.LastClose;
 
+        // === V4: İndikator scoring (API sorğusu YOX, lokal hesablama) ===
+        var indicators = IndicatorScorer.Score(
+            direction,
+            context.M1TrendCandles,
+            context.M5);
+
+        analysis.Confidence += indicators.Score;
+        analysis.Reasons.AddRange(indicators.Reasons);
+        analysis.Indicators = indicators;
+
         if (bestModel.IsConfirmed)
         {
             analysis.HasModelConfirmation = true;
@@ -596,12 +606,17 @@ public class CoreBinarySignalService : ISmartSignalService
         analysis.ExpiryReason =
             $"Core V3 expiry: {analysis.ExpiryMinutes} dəqiqə seçildi. Model: {analysis.ModelName}. Volatility: {context.VolatilityState}.";
 
-        analysis.TradeReady =
-            analysis.HasModelConfirmation &&
-            analysis.HasPriceAction &&
-            !directionConflict &&
-            !context.IsChoppy &&
-            analysis.Confidence >= MinimumConfidence;
+        var tier = IndicatorScorer.EvaluateTier(
+                    analysis.HasModelConfirmation,
+                    analysis.HasPriceAction,
+                    directionConflict,
+                    context.IsChoppy,
+                    analysis.Confidence,
+                    indicators,
+                    MinimumConfidence);
+
+        analysis.TradeReady = tier.TradeReady;
+        analysis.Reasons.Add($"Tier: {tier.Tier} — {tier.Reason}");
 
         if (!analysis.TradeReady)
         {
@@ -1462,6 +1477,7 @@ public class CoreBinarySignalService : ISmartSignalService
         public string ModelName { get; set; } = string.Empty;
 
         public List<string> Reasons { get; set; } = new();
+        public IndicatorScorer.IndicatorResult? Indicators { get; set; }
 
         public string DebugSummary =>
             $"Model={ModelName}, ModelOk={HasModelConfirmation}, PA={HasPriceAction}, Ready={TradeReady}";
