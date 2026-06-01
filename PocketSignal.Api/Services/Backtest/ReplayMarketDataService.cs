@@ -1,4 +1,4 @@
-﻿using PocketSignal.Api.Models.Analysis;
+﻿using System.Globalization;
 using PocketSignal.Api.Models.Common;
 using PocketSignal.Api.Services.MarketData;
 
@@ -8,26 +8,25 @@ namespace PocketSignal.Api.Services.Backtest;
 /// Backtest üçün market data servisi. Real API-yə getmir —
 /// əvvəlcədən yüklənmiş tarixi candle-lardan müəyyən "pəncərə" qaytarır.
 ///
-/// İş prinsipi: backtest mühərriki SetCursor(time) çağırır, bu servis isə
-/// strategiyaya YALNIZ həmin andan ƏVVƏLKİ candle-ları verir (look-ahead bias olmasın deyə).
-///
-/// Bu servis IMarketDataService-i implement etdiyi üçün strategiya
-/// (CoreForexSignalService) heç nə bilmədən onun üzərində işləyə bilir.
+/// PERFORMANS: vaxtlar (DateTime) YALNIZ BİR DƏFƏ parse olunur və saxlanılır.
+/// Hər sorğuda yenidən parse etmirik — bu, crash/yavaşlığın qarşısını alır.
 /// </summary>
 public class ReplayMarketDataService : IMarketDataService
 {
-    // interval -> bütün tarixi candle-lar (köhnədən yeniyə sıralı)
-    private readonly Dictionary<string, List<CandleDto>> _history = new();
+    // interval -> əvvəlcədən parse olunmuş (time, candle) cütləri, köhnədən yeniyə sıralı.
+    private readonly Dictionary<string, List<(DateTime Time, CandleDto Candle)>> _history = new();
 
-    // Backtest mühərrikinin "indiki an" kursoru. Bu andan sonrakı candle-lar gizlədilir.
     private DateTime _cursorUtc = DateTime.MaxValue;
 
     public void LoadHistory(string interval, List<CandleDto> candles)
     {
-        // Köhnədən yeniyə sırala (strategiya bu sıranı gözləyir).
-        _history[interval.ToLowerInvariant()] = candles
-            .OrderBy(ParseTime)
+        var parsed = candles
+            .Select(c => (Time: ParseTime(c), Candle: c))
+            .Where(x => x.Time != DateTime.MinValue)
+            .OrderBy(x => x.Time)
             .ToList();
+
+        _history[interval.ToLowerInvariant()] = parsed;
     }
 
     public void SetCursor(DateTime cursorUtc)
@@ -35,15 +34,12 @@ public class ReplayMarketDataService : IMarketDataService
         _cursorUtc = cursorUtc;
     }
 
-    /// <summary>
-    /// Backtest mühərriki üçün: ən kiçik timeframe-in (adətən 1min) bütün candle-larını qaytarır
-    /// ki, onların üzərində addım-addım irəliləyə bilsin.
-    /// </summary>
+    /// <summary>Backtest mühərriki üçün: tam seriyanı (parse olunmuş) qaytarır.</summary>
     public List<CandleDto> GetFullSeries(string interval)
     {
         var key = interval.ToLowerInvariant();
         return _history.TryGetValue(key, out var list)
-            ? list
+            ? list.Select(x => x.Candle).ToList()
             : new List<CandleDto>();
     }
 
@@ -64,14 +60,21 @@ public class ReplayMarketDataService : IMarketDataService
             });
         }
 
-        // Look-ahead bias-ın qarşısını al: yalnız kursordan ƏVVƏLKİ (və ona bərabər) candle-lar.
-        var visible = all
-            .Where(c => ParseTime(c) <= _cursorUtc)
-            .TakeLast(outputSize)
-            .ToList();
+        // Look-ahead bias-ın qarşısını al: yalnız kursordan ƏVVƏLKİ candle-lar.
+        // Vaxtlar onsuz da parse olunub və sıralı — sadəcə kəsirik.
+        var visible = new List<CandleDto>(outputSize);
+        var startCollecting = false;
 
-        // TwelveData "values"-ı yenidən köhnəyə qaytarır, MapCandles onsuz da yenidən sıralayır,
-        // ona görə sıralama kritik deyil, amma orijinal davranışa uyğun saxlayırıq.
+        // Sondan geriyə getmək əvəzinə, sıralı siyahıda yuxarı sərhədi tapırıq.
+        var upperIndex = all.Count - 1;
+        while (upperIndex >= 0 && all[upperIndex].Time > _cursorUtc)
+            upperIndex--;
+
+        var lowerIndex = Math.Max(0, upperIndex - outputSize + 1);
+
+        for (var i = lowerIndex; i <= upperIndex; i++)
+            visible.Add(all[i].Candle);
+
         return Task.FromResult<TwelveDataResponse?>(new TwelveDataResponse
         {
             Status = "ok",
@@ -89,11 +92,8 @@ public class ReplayMarketDataService : IMarketDataService
         };
 
         return DateTime.TryParseExact(
-            c.DateTime,
-            formats,
-            System.Globalization.CultureInfo.InvariantCulture,
-            System.Globalization.DateTimeStyles.None,
-            out var t)
+            c.DateTime, formats, CultureInfo.InvariantCulture,
+            DateTimeStyles.None, out var t)
             ? t
             : DateTime.MinValue;
     }

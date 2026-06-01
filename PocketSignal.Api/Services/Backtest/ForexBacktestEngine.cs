@@ -31,14 +31,20 @@ public class ForexBacktestEngine
         List<CandleDto> m5,
         List<CandleDto> m1,
         int stepEveryNCandles = 5,
+        string strategyName = "breaker",
         CancellationToken cancellationToken = default)
     {
         _replay.LoadHistory("15min", m15);
         _replay.LoadHistory("5min", m5);
         _replay.LoadHistory("1min", m1);
 
-        // Strategiya replay servisi üzərində işləyir.
-        var strategy = new CoreForexSignalService(_replay);
+        // Strategiya seçimi. Hər ikisi IForexSignalService implement edir,
+        // ona görə engine eyni qalır.
+        IForexSignalService strategy = strategyName.ToLowerInvariant() switch
+        {
+            "ema" => new EmaPullbackForexSignalService(_replay),
+            _ => new CoreForexSignalService(_replay)
+        };
 
         var m1Series = _replay.GetFullSeries("1min")
             .Select(ToCandle)
@@ -55,9 +61,13 @@ public class ForexBacktestEngine
         // İlk 260 candle strategiyanın tarixçə tələbi üçün lazımdır, ondan sonra başla.
         var startIndex = 260;
 
+        // Hold müddəti candle SAYI ilə ölçülür (timeframe-dən asılı olmasın).
+        // M1-də 80 candle = ~1.3 saat; M15-də 80 candle = 20 saat. Hər ikisi məntiqli.
+        var maxHoldCandles = 80;
+
         // Eyni anda yalnız 1 açıq trade (real davranışa uyğun).
         var openTrade = false;
-        DateTime tradeOpenTime = default;
+        var tradeOpenIndex = 0;
 
         for (var i = startIndex; i < m1Series.Count; i += stepEveryNCandles)
         {
@@ -68,9 +78,7 @@ public class ForexBacktestEngine
             // Açıq trade varsa, yeni signal axtarma (overlapping qarşısı).
             if (openTrade)
             {
-                // Trade hələ açıqdırsa və kifayət vaxt keçibsə bağlanmış sayılır
-                // (nəticə artıq trade açılanda hesablanıb, bu sadəcə bloku açır).
-                if ((now - tradeOpenTime).TotalMinutes >= report.MaxHoldMinutes)
+                if (i - tradeOpenIndex >= maxHoldCandles)
                     openTrade = false;
                 else
                     continue;
@@ -96,7 +104,7 @@ public class ForexBacktestEngine
                 signal,
                 m1Series,
                 i,
-                report.MaxHoldMinutes);
+                maxHoldCandles);
 
             if (outcome == TradeOutcome.NoFill)
                 continue;
@@ -127,7 +135,7 @@ public class ForexBacktestEngine
             report.Trades.Add(trade);
 
             openTrade = true;
-            tradeOpenTime = now;
+            tradeOpenIndex = i;
         }
 
         report.Compute();
@@ -142,7 +150,7 @@ public class ForexBacktestEngine
         ForexTradeSignal signal,
         List<(DateTime time, double o, double h, double l, double c)> series,
         int entryIndex,
-        int maxHoldMinutes)
+        int maxHoldCandles)
     {
         var entry = (double)signal.EntryPrice;
         var sl = (double)signal.StopLoss;
@@ -152,14 +160,11 @@ public class ForexBacktestEngine
         var isLong = signal.Direction == "LONG";
         var hitTp1 = false;
 
-        var entryTime = series[entryIndex].time;
+        var endIndex = Math.Min(series.Count - 1, entryIndex + maxHoldCandles);
 
-        for (var j = entryIndex + 1; j < series.Count; j++)
+        for (var j = entryIndex + 1; j <= endIndex; j++)
         {
             var candle = series[j];
-
-            if ((candle.time - entryTime).TotalMinutes > maxHoldMinutes)
-                break;
 
             if (isLong)
             {
