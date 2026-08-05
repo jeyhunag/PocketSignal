@@ -1,43 +1,24 @@
 ﻿namespace PocketSignal.Api.Services.Forex;
 
+/// <summary>
+/// Bütün cütlər (qızıl daxil) Cassandra sisteminə (CoreForexSignalService) yönləndirilir.
+/// Köhnə XauUsdScalpingSignalService artıq istifadə olunmur.
+/// </summary>
 public class ForexSignalRouterService : IForexSignalService
 {
     private readonly CoreForexSignalService _coreForexSignalService;
-    private readonly XauUsdScalpingSignalService _xauUsdScalpingSignalService;
 
     public ForexSignalRouterService(
-        CoreForexSignalService coreForexSignalService,
-        XauUsdScalpingSignalService xauUsdScalpingSignalService)
+        CoreForexSignalService coreForexSignalService)
     {
         _coreForexSignalService = coreForexSignalService;
-        _xauUsdScalpingSignalService = xauUsdScalpingSignalService;
     }
 
     public Task<Models.Forex.ForexTradeSignal> AnalyzeAsync(
         string symbol,
         CancellationToken cancellationToken = default)
     {
-        if (IsXauUsd(symbol))
-        {
-            return _xauUsdScalpingSignalService.AnalyzeAsync(
-                "XAU/USD",
-                cancellationToken);
-        }
-
-        return _coreForexSignalService.AnalyzeAsync(
-            symbol,
-            cancellationToken);
-    }
-
-    private static bool IsXauUsd(string symbol)
-    {
-        var normalized = symbol
-            .Trim()
-            .Replace("/", "")
-            .Replace("-", "")
-            .Replace(" ", "")
-            .ToUpperInvariant();
-
-        return normalized == "XAUUSD";
+        // Qızıl da, digər cütlər də eyni Cassandra sistemi ilə analiz olunur.
+        return _coreForexSignalService.AnalyzeAsync(symbol, cancellationToken);
     }
 }

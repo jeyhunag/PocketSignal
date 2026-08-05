@@ -96,23 +96,29 @@ public class BacktestController : ControllerBase
             var tfLower = tf.ToLowerInvariant();
 
             // Tək-timeframe rejimi: ema və core (M30) strategiyaları üçün.
-            var isSingleTfMode = tfLower == "ema" || tfLower == "core";
+            var isSingleTfMode = tfLower == "ema" || tfLower == "core" || tfLower == "core15" || tfLower == "core5";
 
             var strategyName = tfLower switch
             {
                 "ema" => "ema",
                 "core" => "breaker",     // CoreForexSignalService, M30
+                "core15" => "breaker",   // CoreForexSignalService, M15
+                "core5" => "breaker",    // CoreForexSignalService, M5
                 _ => "breaker"
             };
+
+            var singleTf = tfLower == "core15" ? "15min"
+                : tfLower == "core5" ? "5min"
+                : "30min";
 
             string tfBig, tfMid, tfSmall;
             if (isSingleTfMode)
             {
                 // Strategiya yalnız "1min" slotunu (entry seriyası) oxuyur.
-                // Engine üçün hər üç slot da lazımdır, ona görə hamısını 30min veririk.
-                tfBig = "30min";
-                tfMid = "30min";
-                tfSmall = "30min";
+                // Engine üçün hər üç slot da lazımdır, ona görə hamısını eyni veririk.
+                tfBig = singleTf;
+                tfMid = singleTf;
+                tfSmall = singleTf;
             }
             else if (tfLower == "m15")
             {
@@ -165,7 +171,9 @@ public class BacktestController : ControllerBase
             {
                 report.Symbol,
                 timeframeSet = tfLower == "ema" ? "30min (EMA Pullback)"
-                    : tfLower == "core" ? "30min (EMA50 + Williams %R)"
+                    : tfLower == "core" ? "30min (Şam-trend + Williams %R)"
+                    : tfLower == "core15" ? "15min (Şam-trend + Williams %R)"
+                    : tfLower == "core5" ? "5min (Şam-trend + Williams %R)"
                     : tfLower == "m15" ? "4h/1h/15min"
                     : "15min/5min/1min",
                 strategy = strategyName,

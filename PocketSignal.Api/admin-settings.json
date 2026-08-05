@@ -21,11 +21,10 @@
     "CAD/JPY",
     "AUD/CAD"
   ],
-  "forexEnabled": false,
-  "forexActiveSymbol": "EUR/USD",
+  "forexEnabled": true,
+  "forexActiveSymbol": "EUR/CAD",
   "forexActiveSymbols": [
-    "EUR/USD",
-    "BTC/USD"
+    "EUR/CAD"
   ],
   "forexSymbols": [
     "GBP/JPY",
@@ -51,7 +50,7 @@
     "CAD/JPY",
     "AUD/CAD"
   ],
-  "mt5AutoTradeEnabled": true,
+  "mt5AutoTradeEnabled": false,
   "mt5LotSize": 0.02,
   "mt5TakeProfitMode": "TP1",
   "mt5MinimumConfidence": 80,
@@ -61,5 +60,5 @@
   "mt5MaxTradesPerDay": 20,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-05-31T07:45:42.2160504Z"
+  "updatedAtUtc": "2026-08-05T22:58:30.526404Z"
 }

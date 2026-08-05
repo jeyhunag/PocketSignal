@@ -1,4 +1,5 @@
-﻿using PocketSignal.Api.Models;
+﻿using System.Globalization;
+using PocketSignal.Api.Models;
 using PocketSignal.Api.Models.Analysis;
 using PocketSignal.Api.Models.Common;
 using PocketSignal.Api.Models.Forex;
@@ -7,43 +8,50 @@ using PocketSignal.Api.Services.MarketData;
 namespace PocketSignal.Api.Services.Forex;
 
 /// <summary>
-/// EMA50 + Williams %R Reversal (M30).
+/// CASSANDRA — Bias + Zona sistemi (yalnız XAU/USD, M15 analiz).
 ///
-/// MƏNTİQ:
-///   Trend istiqamətində, qiymət dərin geri çəkiləndə (oversold/overbought),
-///   reversal şamı + təsdiq şamı ilə girişi tuturuq.
+/// ŞAHMAT MƏNTİQİ:
+///   • Qərar Nöqtəsi = ŞAH. Bu qırılsa bias dəyişir.
+///   • Zonalar = PİYADALAR. Bias istiqamətindəki güclü support/resistance səviyyələri.
+///   • Bias SELL-dirsə, ŞAH qırılana qədər yalnız SELL zonaları işlək (BUY yox).
+///   • Bias BUY-dursa, ŞAH qırılana qədər yalnız BUY zonaları işlək (SELL yox).
 ///
-/// QAYDALAR (LONG):
-///   1. M30 qrafik.
-///   2. Trend: close > EMA50 → qalxan trend (yalnız LONG).
-///   3. Williams %R(14) < -85 (oversold — qiymət dərin düşüb).
-///   4. Siqnal şamı (öncəki şam): aşağı sancılıb, amma yuxarı/bullish bağlanıb
-///      (close > open).
-///   5. Təsdiq şamı (son şam): siqnal şamının diapazonunun 70%-i ÜSTÜNDƏ bağlanır
-///      yəni close >= signalLow + 0.70 × (signalHigh - signalLow).
-///   6. Giriş: 2 ATR SL, 2 ATR TP (1:1).
-///
-/// QAYDALAR (SHORT) — simmetrik:
-///   2. close < EMA50 → düşən trend (yalnız SHORT).
-///   3. Williams %R(14) > -15 (overbought).
-///   4. Siqnal şamı: yuxarı sancılıb, amma aşağı/bearish bağlanıb (close < open).
-///   5. Təsdiq şamı: siqnal şamının diapazonunun 70%-i ALTINDA bağlanır
-///      yəni close <= signalHigh - 0.70 × (signalHigh - signalLow).
-///   6. Giriş: 2 ATR SL, 2 ATR TP.
-///
-/// EMA50 ortada (FLAT) olarsa trade yoxdur.
-/// Strategiya yalnız "1min" slotundan oxuyur (backtest ora M30 verir).
+/// TƏKMİLLƏŞDİRMƏLƏR (v2):
+///   1. Zona keyfiyyəti — swing səviyyələri toleransla qruplaşdırılır;
+///      neçə dəfə toxunulubsa o qədər güclü (touch count).
+///   2. Şah — struktur qırılması əsasında (ən son təsdiqlənmiş HH/LL).
+///   3. Parametrlər M15-ə uyğun.
+///   4. Bias dəyişimi ForexTradeSignal-da işarələnir (BiasChanged).
 /// </summary>
 public class CoreForexSignalService : IForexSignalService
 {
-    private const int WilliamsPeriod = 14;
-    private const double OversoldLevel = -85.0;   // LONG: %R bunu aşağıdan yuxarı kəsməlidir
-    private const double OverboughtLevel = -15.0; // SHORT: %R bunu yuxarıdan aşağı kəsməlidir
-    private const double BodyMinRatio = 0.75;     // siqnal şamının gövdəsi ≥ 75%
-    private const int ConfirmWindow = 3;           // setup-ı son neçə şam içində axtarsın
-    private const double StopAtrMult = 2.0;       // SL = 2 × ATR
-    private const double TpAtrMult = 3.0;         // TP = 3 × ATR (1:1.5 RR)
-    private const decimal MinAtrPips = 5m;        // ATR bu pip-dən kiçikdirsə trade yox (dar/sakit dövr filtri)
+    private const string TargetSymbol = "XAU/USD";
+
+    // M15 analiz.
+    private const string Interval = "15min";
+    private const int CandleCount = 300;
+
+    // Trend üçün son neçə M15 şama baxılsın (~ 200 şam = ~2 gün).
+    private const int TrendLookback = 60;
+
+    // Swing (dönüş) nöqtəsi üçün sol/sağ qonşu sayı — M15-də bir az daha geniş.
+    private const int SwingLeft = 4;
+    private const int SwingRight = 4;
+
+    // Zona qruplaşdırma toleransı: qiymətin bu faizi qədər yaxın swing-lər eyni zona sayılır.
+    // XAU üçün ~0.0015 (0.15%) təqribən 6$ (4000-də) — real zona genişliyi.
+    private const decimal ZoneTolerancePct = 0.0015m;
+
+    // Zona ən azı neçə dəfə toxunulmalıdır ki, "güclü" sayılsın.
+
+    // Neçə zona göstərilsin — real support/resistance neçə varsa (maksimum bu qədər).
+    private const int MaxZones = 5;
+
+    // Biasa TƏRS zona üçün minimum toxunuş sayı — bundan az olsa göstərilmir.
+    // 3+ toxunuş = həqiqətən güclü səviyyə (2 çox zəifdir, uydurma olar).
+    private const int MinCounterTouches = 3;   // tərs zona üçün minimum toxunuş (güclü olsun)
+
+    // Yaxın zonalar (tez giriş) + uzaq güclü zonalar (təhlükəsiz giriş) — hər ikisi saxlanır.
 
     private readonly IMarketDataService _marketDataService;
 
@@ -57,181 +65,159 @@ public class CoreForexSignalService : IForexSignalService
         string symbol,
         CancellationToken cancellationToken = default)
     {
+        // Gələn symbol analiz olunur (XAU/USD, EUR/USD və s.) — hansı seçilibsə.
+        if (string.IsNullOrWhiteSpace(symbol))
+            symbol = TargetSymbol;
+
         var response = await _marketDataService.GetCandlesAsync(
             symbol,
-            "1min",
-            260,
+            Interval,
+            CandleCount,
             cancellationToken);
 
-        var candles = MapCandles(response);
+        var candles = MapCandles(response, symbol);
 
-        if (candles.Count < 60)
-            return Wait(symbol, "EMA50 + %R üçün kifayət qədər M30 candle yoxdur.");
+        if (candles.Count < TrendLookback + 30)
+            return Wait(symbol, "Cassandra analizi üçün kifayət qədər M15 candle yoxdur.");
 
-        var ema50 = CalculateEma(candles, 50);
-        var atr = CalculateAtr(candles, 14);
-        if (atr <= 0)
-            return Wait(symbol, "ATR hesablanmadı.");
+        var lastPrice = candles[^1].Close;
 
-        // === Min ATR filtri: dar/sakit dövrdə trade yox ===
-        // ATR çox kiçik olanda SL də kiçik olur, qiymət noise içində SL-i vurur.
-        var atrPips = (decimal)atr / GetPipSize(symbol);
-        if (atrPips < MinAtrPips)
-            return Wait(symbol, $"ATR çox kiçik ({atrPips:0.#} pip < {MinAtrPips}). Sakit dövr, trade yox.");
+        // ===== SWING nöqtələri =====
+        var swings = FindSwings(candles, SwingLeft, SwingRight);
 
-        // === Trend (EMA50) — son şama görə ===
-        var lastClose = candles[^1].Close;
-        string trend;
-        if (lastClose > ema50)
-            trend = "UP";
-        else if (lastClose < ema50)
-            trend = "DOWN";
-        else
-            return Wait(symbol, $"Trend FLAT (close=EMA50={FormatPrice(ema50)}). Trade yoxdur.");
+        var swingHighs = swings.Where(x => x.Kind == "HIGH").OrderBy(x => x.Index).ToList();
+        var swingLows = swings.Where(x => x.Kind == "LOW").OrderBy(x => x.Index).ToList();
 
-        // === Setup (video qaydaları) son ConfirmWindow şam içində ===
-        // Təsdiq şamı son 1..ConfirmWindow mövqelərindən biri ola bilər.
-        // LONG üçün hər təsdiq şamı (c) və ondan əvvəlki siqnal şamı (s) üçün:
-        //   1) Williams %R -85-i AŞAĞIDAN YUXARI kəsməlidir (s mövqeyində: əvvəl <-85, indi >=-85).
-        //   2) Siqnal şamı (s) qalxan/güclü gövdəli olmalıdır (gövdə ≥ BodyMinRatio).
-        //   3) Təsdiq şamı (c) siqnal şamının HIGH-ını keçməlidir (100% keçmə).
-        // SHORT simmetrik.
-        var direction = trend == "UP" ? "LONG" : "SHORT";
+        if (swingHighs.Count < 3 || swingLows.Count < 3)
+            return Wait(symbol, "Cassandra: kifayət qədər swing nöqtəsi tapılmadı.");
 
-        PriceCandle? confirm = null;
-        double williamsR = -50;
-        string lastDetail = "setup tapılmadı";
+        // ===== 1) BIAS (struktur qırılması əsasında) =====
+        var bias = DetermineBias(candles, swingHighs, swingLows);
 
-        for (var back = 0; back < ConfirmWindow; back++)
+        // ===== 2) ZONALAR — real support/resistance (swing əsaslı) =====
+        // Sadə və dürüst: zona = qiymətin dəfələrlə dönüş etdiyi swing səviyyəsi.
+        // Yaxın swing-lər bir zonaya qruplaşdırılır. Neçə real zona varsa o qədər.
+        // Uydurma yoxdur — zona yoxdursa göstərilmir.
+        var sellZones = new List<decimal>();
+        var buyZones = new List<decimal>();
+
+        var highClusters = ClusterLevels(swingHighs.Select(x => x.Price).ToList(), lastPrice);
+        var lowClusters = ClusterLevels(swingLows.Select(x => x.Price).ToList(), lastPrice);
+
+        if (bias == "SELL")
         {
-            var confirmIdx = candles.Count - 1 - back;
-            var signalIdx = confirmIdx - 1;
-            if (signalIdx < WilliamsPeriod + 1)
-                break;
-
-            var c = candles[confirmIdx];   // təsdiq şamı
-            var s = candles[signalIdx];    // siqnal şamı
-
-            // Təsdiq şamı da trend tərəfində olmalıdır.
-            var confirmTrendOk = trend == "UP" ? c.Close > ema50 : c.Close < ema50;
-            if (!confirmTrendOk)
-                continue;
-
-            var sRange = s.High - s.Low;
-            if (sRange <= 0)
-                continue;
-
-            // Siqnal şamının gövdə nisbəti.
-            var sBody = Math.Abs(s.Close - s.Open);
-            var sBodyRatio = sBody / sRange;
-
-            // %R: siqnal şamı (signalIdx) və ondan bir əvvəl (prev) — kəsmə üçün.
-            var rSignal = CalculateWilliamsR(candles, WilliamsPeriod, back + 1);
-            var rPrev = CalculateWilliamsR(candles, WilliamsPeriod, back + 2);
-
-            bool ok;
-            if (trend == "UP")
-            {
-                // 1) -85-i aşağıdan yuxarı kəsmə
-                var crossUp = rPrev < OversoldLevel && rSignal >= OversoldLevel;
-                // 2) siqnal şamı bullish + tam gövdəli
-                var strongBull = s.Close > s.Open && sBodyRatio >= BodyMinRatio;
-                // 3) təsdiq şamı siqnal şamının HIGH-ını keçir
-                var brokeHigh = c.Close > s.High;
-
-                ok = crossUp && strongBull && brokeHigh;
-                lastDetail = $"%R kəsmə(crossUp={crossUp}, prev={rPrev:0.#}, now={rSignal:0.#}), " +
-                             $"güclü bull(body={sBodyRatio:0.00}≥{BodyMinRatio}:{strongBull}), high keçmə={brokeHigh}";
-            }
-            else
-            {
-                var crossDown = rPrev > OverboughtLevel && rSignal <= OverboughtLevel;
-                var strongBear = s.Close < s.Open && sBodyRatio >= BodyMinRatio;
-                var brokeLow = c.Close < s.Low;
-
-                ok = crossDown && strongBear && brokeLow;
-                lastDetail = $"%R kəsmə(crossDown={crossDown}, prev={rPrev:0.#}, now={rSignal:0.#}), " +
-                             $"güclü bear(body={sBodyRatio:0.00}≥{BodyMinRatio}:{strongBear}), low keçmə={brokeLow}";
-            }
-
-            if (ok)
-            {
-                confirm = c;
-                williamsR = rSignal;
-                break;
-            }
+            // SELL zonaları: qiymətdən YUXARIDAKI resistance səviyyələri.
+            sellZones = highClusters
+                .Where(c => c.Price >= lastPrice)
+                .OrderBy(c => Math.Abs(c.Price - lastPrice))
+                .Take(MaxZones)
+                .Select(c => c.Price)
+                .OrderBy(p => p)
+                .ToList();
+        }
+        else if (bias == "BUY")
+        {
+            // BUY zonaları: qiymətdən AŞAĞIDAKI support səviyyələri.
+            buyZones = lowClusters
+                .Where(c => c.Price <= lastPrice)
+                .OrderBy(c => Math.Abs(c.Price - lastPrice))
+                .Take(MaxZones)
+                .Select(c => c.Price)
+                .OrderByDescending(p => p)
+                .ToList();
         }
 
-        if (confirm == null)
-            return Wait(symbol, $"{direction} setup şərtləri ödənmədi (son {ConfirmWindow} şam). {lastDetail}");
+        // ===== 3) QƏRAR NÖQTƏSİ (ŞAH) — piyadalardan KƏNARDA + GÜCLÜ =====
+        // ŞAH "son müdafiə xətti"dir və ən güclü (çox toxunulan) səviyyə olmalıdır.
+        //   BUY bias: şah bütün BUY zonalarından AŞAĞIDA. Qiymət oranı qırsa → bias SELL.
+        //   SELL bias: şah bütün SELL zonalarından YUXARIDA. Qiymət oranı qırsa → bias BUY.
+        var decisionPoint = DetermineDecisionPoint(
+            bias, buyZones, sellZones, lowClusters, highClusters, lastPrice, swingLows, swingHighs);
 
-        var entry = (decimal)confirm.Close;
+        // ===== ƏN YAXIN ZONA =====
+        var activeZones = bias == "SELL" ? sellZones : buyZones;
+        var nearestZone = activeZones.Count > 0
+            ? activeZones.OrderBy(p => Math.Abs(p - lastPrice)).First()
+            : decisionPoint;
 
-        // === SL / TP ===
-        var slDistance = (decimal)(atr * StopAtrMult);
-        var tpDistance = (decimal)(atr * TpAtrMult);
-
-        decimal stopLoss, takeProfit;
-        if (direction == "LONG")
+        // ===== BIASA TƏRS ZONA (ən güclü əks səviyyə) =====
+        // BUY bias: yuxarıdakı ən çox toxunulan resistance (güclü tepki → aşağı reaksiya).
+        // SELL bias: aşağıdakı ən çox toxunulan support (güclü tepki → yuxarı reaksiya).
+        // Yalnız MinCounterTouches+ toxunuş varsa göstərilir (uydurma yoxdur).
+        decimal counterZone = 0;
+        if (bias == "BUY")
         {
-            stopLoss = entry - slDistance;
-            takeProfit = entry + tpDistance;
+            var strongest = highClusters
+                .Where(c => c.Price > lastPrice && c.Touches >= MinCounterTouches)
+                .OrderByDescending(c => c.Touches)
+                .ThenBy(c => Math.Abs(c.Price - lastPrice))
+                .FirstOrDefault();
+            if (strongest != null)
+                counterZone = strongest.Price;
         }
-        else
+        else if (bias == "SELL")
         {
-            stopLoss = entry + slDistance;
-            takeProfit = entry - tpDistance;
+            var strongest = lowClusters
+                .Where(c => c.Price < lastPrice && c.Touches >= MinCounterTouches)
+                .OrderByDescending(c => c.Touches)
+                .ThenBy(c => Math.Abs(c.Price - lastPrice))
+                .FirstOrDefault();
+            if (strongest != null)
+                counterZone = strongest.Price;
         }
 
-        var pipSize = GetPipSize(symbol);
-        var riskPips = Math.Abs(entry - stopLoss) / pipSize;
-        var rewardPips = Math.Abs(takeProfit - entry) / pipSize;
-        var rr = riskPips > 0 ? rewardPips / riskPips : 0;
+        // ===== Mətn (Cassandra formatı) =====
+        var note = BuildBiasNote(symbol, bias, sellZones, buyZones, decisionPoint, nearestZone, counterZone);
 
-        var entryR = RoundPrice(symbol, entry);
-        var slR = RoundPrice(symbol, stopLoss);
-        var tpR = RoundPrice(symbol, takeProfit);
+        var direction = bias == "SELL" ? "SHORT"
+            : bias == "BUY" ? "LONG"
+            : "WAIT";
+
+        // Cassandra order/trade sistemi DEYİL — yalnız bias/zona məlumatı.
+        // DB-də və köhnə trade-tracker-də "trade" kimi qeydə düşməsin deyə
+        // Direction həmişə WAIT saxlanır (əsl istiqamət Bias sahəsindədir).
+        var dbDirection = "WAIT";
 
         var reasons = new List<string>
         {
-            $"EMA50 + Williams %R {direction} signal.",
-            $"Trend (EMA50={FormatPrice(ema50)}): {trend}.",
-            $"Williams %R(14) = {williamsR:0.#}.",
-            "Siqnal şamı + təsdiq şamı (70% qayıtma) təsdiqləndi.",
-            $"SL={StopAtrMult}×ATR, TP={TpAtrMult}×ATR (ATR={FormatPrice(atr)}), RR 1:{TpAtrMult / StopAtrMult:0.#}."
+            $"Cassandra Bias: {bias}.",
+            $"Qərar nöqtəsi (şah): {FormatPrice(symbol, decisionPoint)}.",
+            $"Ən yaxın zona: {FormatPrice(symbol, nearestZone)}.",
+            bias == "SELL"
+                ? "Qiymət satış tərəfinin nəzarətindədir."
+                : bias == "BUY"
+                    ? "Qiymət alış tərəfinin nəzarətindədir."
+                    : "Bias neytraldır."
         };
 
         return new ForexTradeSignal
         {
             Symbol = symbol,
-            Direction = direction,
-            EntryPrice = entryR,
-            StopLoss = slR,
-            TakeProfit1 = tpR,
-            TakeProfit2 = tpR,
-            RiskPips = Math.Round(riskPips, 1),
-            RewardPips1 = Math.Round(rewardPips, 1),
-            RewardPips2 = Math.Round(rewardPips, 1),
-            RiskReward1 = Math.Round(rr, 2),
-            RiskReward2 = Math.Round(rr, 2),
-            Confidence = 75,
-            Grade = "B",
-            Message = $"{symbol} {direction} Entry: {entryR} SL: {slR} TP: {tpR}",
-            InvalidIf = direction == "LONG"
-                ? $"Qiymət EMA50 ({FormatPrice(ema50)}) altına düşsə trend dəyişir."
-                : $"Qiymət EMA50 ({FormatPrice(ema50)}) üstünə qalxsa trend dəyişir.",
-            ValidForMinutes = 30,
+            Direction = dbDirection,
+
+            Bias = bias,
+            SellZones = sellZones,
+            BuyZones = buyZones,
+            DecisionPoint = RoundPrice(symbol, decisionPoint),
+            NearestZone = RoundPrice(symbol, nearestZone),
+            CounterZone = counterZone > 0 ? RoundPrice(symbol, counterZone) : 0,
+            LastPrice = RoundPrice(symbol, lastPrice),
+            BiasNote = note,
+
+            Confidence = bias == "NEUTRAL" ? 0 : 75,
+            Grade = bias == "NEUTRAL" ? "NO_TRADE" : "B",
+            Message = $"{symbol} | Bias: {bias} | Ən yaxın zona: {FormatPrice(symbol, nearestZone)}",
             Reasons = reasons,
             SideAnalyses = new List<SideAnalysis>(),
             StrategyResults = new List<ForexStrategyResult>
             {
                 new ForexStrategyResult
                 {
-                    StrategyName = "EMA50_WILLIAMS_R_M30",
-                    Direction = direction,
-                    Score = 75,
+                    StrategyName = "CASSANDRA_XAU_M15",
+                    Direction = direction == "WAIT" ? "FILTER" : direction,
+                    Score = bias == "NEUTRAL" ? 0 : 75,
                     MaxScore = 100,
-                    IsConfirmed = true,
+                    IsConfirmed = bias != "NEUTRAL",
                     Reasons = reasons
                 }
             },
@@ -239,108 +225,293 @@ public class CoreForexSignalService : IForexSignalService
         };
     }
 
-    // ==================== Köməkçi hesablamalar ====================
+    // ==================== BIAS (struktur qırılması) ====================
 
     /// <summary>
-    /// Williams %R = -100 × (HighestHigh - Close) / (HighestHigh - LowestLow).
-    /// offsetFromEnd=0 → son şam, 1 → öncəki (siqnal) şam.
-    /// period qədər şama (həmin şamdan geriyə) baxır. 0..-100 arası.
+    /// Bias: SELL / BUY / NEUTRAL.
+    /// Struktur: son swing HIGH/LOW-lara baxır.
+    ///   Higher-High + Higher-Low → BUY (yüksələn struktur).
+    ///   Lower-High + Lower-Low → SELL (enən struktur).
+    /// Struktur qeyri-müəyyəndirsə qiymət trendinə (lastClose vs pastClose) əsaslanır.
     /// </summary>
-    private static double CalculateWilliamsR(List<PriceCandle> candles, int period, int offsetFromEnd = 0)
+    private static string DetermineBias(
+        List<Candle> candles,
+        List<SwingPoint> swingHighs,
+        List<SwingPoint> swingLows)
     {
-        var endIndex = candles.Count - 1 - offsetFromEnd;
-        if (endIndex < period - 1 || endIndex < 0)
-            return -50;
+        var recentHighs = swingHighs.TakeLast(2).ToList();
+        var recentLows = swingLows.TakeLast(2).ToList();
 
-        // endIndex daxil olmaqla geriyə period qədər şam.
-        var window = candles.Skip(endIndex - period + 1).Take(period).ToList();
-        var highestHigh = window.Max(x => x.High);
-        var lowestLow = window.Min(x => x.Low);
-        var close = candles[endIndex].Close;
-
-        var range = highestHigh - lowestLow;
-        if (range <= 0)
-            return -50;
-
-        return -100.0 * (highestHigh - close) / range;
-    }
-
-    private static double CalculateEma(List<PriceCandle> candles, int period)
-    {
-        if (candles.Count == 0 || period <= 0)
-            return 0;
-
-        var take = Math.Min(period * 3, candles.Count);
-        var data = candles.Skip(candles.Count - take).ToList();
-        var multiplier = 2.0 / (period + 1);
-
-        var seedCount = Math.Min(period, data.Count);
-        var ema = data.Take(seedCount).Average(x => x.Close);
-
-        for (var i = seedCount; i < data.Count; i++)
-            ema = (data[i].Close - ema) * multiplier + ema;
-
-        return ema;
-    }
-
-    private static double CalculateAtr(List<PriceCandle> candles, int period)
-    {
-        if (candles.Count < period + 1)
-            return 0;
-
-        var take = Math.Min(period * 4, candles.Count);
-        var data = candles.Skip(candles.Count - take).ToList();
-
-        var trs = new List<double>();
-        for (var i = 1; i < data.Count; i++)
+        var structureTrend = "FLAT";
+        if (recentHighs.Count >= 2 && recentLows.Count >= 2)
         {
-            var high = data[i].High;
-            var low = data[i].Low;
-            var prevClose = data[i - 1].Close;
-            var tr = Math.Max(high - low, Math.Max(Math.Abs(high - prevClose), Math.Abs(low - prevClose)));
-            trs.Add(tr);
+            var hh = recentHighs[1].Price > recentHighs[0].Price;
+            var hl = recentLows[1].Price > recentLows[0].Price;
+            var lh = recentHighs[1].Price < recentHighs[0].Price;
+            var ll = recentLows[1].Price < recentLows[0].Price;
+
+            if (hh && hl)
+                structureTrend = "UP";
+            else if (lh && ll)
+                structureTrend = "DOWN";
         }
 
-        if (trs.Count < period)
-            return trs.Count > 0 ? trs.Average() : 0;
+        var lastClose = candles[^1].Close;
+        var lookback = Math.Min(TrendLookback, candles.Count - 1);
+        var pastClose = candles[^(lookback + 1)].Close;
+        var priceTrend = lastClose > pastClose ? "UP" : lastClose < pastClose ? "DOWN" : "FLAT";
 
-        var atr = trs.Take(period).Average();
-        for (var i = period; i < trs.Count; i++)
-            atr = (atr * (period - 1) + trs[i]) / period;
+        // Struktur əsasdır; qiymət trendi təsdiq/köməkçidir.
+        if (structureTrend == "UP" && priceTrend != "DOWN")
+            return "BUY";
+        if (structureTrend == "DOWN" && priceTrend != "UP")
+            return "SELL";
 
-        return atr;
+        if (priceTrend == "UP")
+            return "BUY";
+        if (priceTrend == "DOWN")
+            return "SELL";
+
+        return "NEUTRAL";
     }
 
-    private static List<PriceCandle> MapCandles(TwelveDataResponse? response)
+    // ==================== QƏRAR NÖQTƏSİ (ŞAH) ====================
+
+    /// <summary>
+    /// ŞAH = son müdafiə xətti. Piyadalardan (zonalardan) KƏNARDA və GÜCLÜ (çox toxunulan).
+    ///   BUY bias: bütün BUY zonalarından AŞAĞIDA olan ən güclü support.
+    ///             Qiymət oranı aşağı qırsa → alıcılar məğlub → bias SELL.
+    ///   SELL bias: bütün SELL zonalarından YUXARIDA olan ən güclü resistance.
+    ///             Qiymət oranı yuxarı qırsa → satıcılar məğlub → bias BUY.
+    /// </summary>
+    private static decimal DetermineDecisionPoint(
+        string bias,
+        List<decimal> buyZones,
+        List<decimal> sellZones,
+        List<LevelCluster> lowClusters,
+        List<LevelCluster> highClusters,
+        decimal lastPrice,
+        List<SwingPoint> swingLows,
+        List<SwingPoint> swingHighs)
+    {
+        if (bias == "BUY")
+        {
+            // Ən aşağı BUY zonası — şah bundan da aşağıda olmalı.
+            var lowestZone = buyZones.Count > 0 ? buyZones.Min() : lastPrice;
+
+            // Bu zonadan aşağıdakı cluster-lər arasından ən güclüsü (çox toxunulan).
+            var candidates = lowClusters
+                .Where(c => c.Price < lowestZone)
+                .ToList();
+
+            if (candidates.Count > 0)
+            {
+                // Əvvəlcə güc (touch), sonra yaxınlıq.
+                return candidates
+                    .OrderByDescending(c => c.Touches)
+                    .ThenByDescending(c => c.Price)
+                    .First()
+                    .Price;
+            }
+
+            // Fallback: ən aşağı swing low.
+            return swingLows.Count > 0 ? swingLows.Min(x => x.Price) : lowestZone;
+        }
+
+        if (bias == "SELL")
+        {
+            // Ən yuxarı SELL zonası — şah bundan da yuxarıda olmalı.
+            var highestZone = sellZones.Count > 0 ? sellZones.Max() : lastPrice;
+
+            var candidates = highClusters
+                .Where(c => c.Price > highestZone)
+                .ToList();
+
+            if (candidates.Count > 0)
+            {
+                return candidates
+                    .OrderByDescending(c => c.Touches)
+                    .ThenBy(c => c.Price)
+                    .First()
+                    .Price;
+            }
+
+            return swingHighs.Count > 0 ? swingHighs.Max(x => x.Price) : highestZone;
+        }
+
+        // NEUTRAL
+        return lastPrice;
+    }
+
+    // ==================== ZONA QRUPLAŞDIRMA (touch count) ====================
+
+    /// <summary>
+    /// Yaxın qiymət səviyyələrini bir zonaya qruplaşdırır.
+    /// Hər zona: orta qiymət + neçə swing ora düşüb (Touches).
+    /// Çox toxunulan səviyyə = güclü support/resistance.
+    /// </summary>
+    private static List<LevelCluster> ClusterLevels(
+        List<decimal> levels,
+        decimal referencePrice)
+    {
+        var result = new List<LevelCluster>();
+        if (levels.Count == 0)
+            return result;
+
+        var tolerance = referencePrice * ZoneTolerancePct;
+        if (tolerance <= 0)
+            tolerance = 1m;
+
+        var sorted = levels.OrderBy(x => x).ToList();
+
+        var currentGroup = new List<decimal> { sorted[0] };
+
+        foreach (var price in sorted.Skip(1))
+        {
+            if (Math.Abs(price - currentGroup.Average()) <= tolerance)
+            {
+                currentGroup.Add(price);
+            }
+            else
+            {
+                result.Add(new LevelCluster
+                {
+                    Price = currentGroup.Average(),
+                    Touches = currentGroup.Count
+                });
+                currentGroup = new List<decimal> { price };
+            }
+        }
+
+        result.Add(new LevelCluster
+        {
+            Price = currentGroup.Average(),
+            Touches = currentGroup.Count
+        });
+
+        // Güclüdən zəifə (çox toxunulan öndə).
+        return result.OrderByDescending(x => x.Touches).ToList();
+    }
+
+    // ==================== SWING ====================
+
+    private static List<SwingPoint> FindSwings(
+        List<Candle> candles,
+        int left,
+        int right)
+    {
+        var swings = new List<SwingPoint>();
+        if (candles.Count < left + right + 1)
+            return swings;
+
+        for (var i = left; i < candles.Count - right; i++)
+        {
+            var isHigh = true;
+            var isLow = true;
+
+            for (var j = i - left; j <= i + right; j++)
+            {
+                if (j == i)
+                    continue;
+
+                if (candles[i].High <= candles[j].High)
+                    isHigh = false;
+
+                if (candles[i].Low >= candles[j].Low)
+                    isLow = false;
+            }
+
+            if (isHigh)
+                swings.Add(new SwingPoint { Index = i, Price = candles[i].High, Kind = "HIGH" });
+
+            if (isLow)
+                swings.Add(new SwingPoint { Index = i, Price = candles[i].Low, Kind = "LOW" });
+        }
+
+        return swings;
+    }
+
+    // ==================== MƏTN ====================
+
+    private static string BuildBiasNote(
+        string symbol,
+        string bias,
+        List<decimal> sellZones,
+        List<decimal> buyZones,
+        decimal decisionPoint,
+        decimal nearestZone,
+        decimal counterZone)
+    {
+        var lines = new List<string>();
+
+        if (bias == "SELL")
+        {
+            lines.Add("Qiymət hazırda satış tərəfinin nəzarətindədir. Əsas plan: yuxarı zonalara reaksiya gəldikdə SELL fürsətini izləmək.");
+            lines.Add("");
+            lines.Add("🔴 SELL zonaları:");
+            foreach (var z in sellZones)
+                lines.Add($"• Sell zone: {FormatPrice(symbol, z)}");
+        }
+        else if (bias == "BUY")
+        {
+            lines.Add("Qiymət hazırda alış tərəfinin nəzarətindədir. Əsas plan: aşağı zonalara reaksiya gəldikdə BUY fürsətini izləmək.");
+            lines.Add("");
+            lines.Add("🟢 BUY zonaları:");
+            foreach (var z in buyZones)
+                lines.Add($"• Buy zone: {FormatPrice(symbol, z)}");
+        }
+        else
+        {
+            lines.Add("Bias neytraldır. Təmiz istiqamət olana qədər gözləmək tövsiyə olunur.");
+        }
+
+        lines.Add($"• Qərar Nöqtəsi (şah): {FormatPrice(symbol, decisionPoint)}");
+
+        // Biasa tərs zona — yalnız güclü tapılıbsa.
+        if (counterZone > 0)
+        {
+            var counterLabel = bias == "BUY" ? "Sell zone (Biasa tərs)" : "Buy zone (Biasa tərs)";
+            lines.Add($"• {counterLabel}: {FormatPrice(symbol, counterZone)}");
+        }
+        lines.Add("");
+        lines.Add($"🎯 Ən yaxın zona: {FormatPrice(symbol, nearestZone)}");
+        lines.Add("⚠️ Riskinizi düzgün idarə edin.");
+
+        return string.Join("\n", lines);
+    }
+
+    // ==================== KÖMƏKÇİ ====================
+
+    private static List<Candle> MapCandles(TwelveDataResponse? response, string symbol)
     {
         if (response?.Values == null)
-            return new List<PriceCandle>();
+            return new List<Candle>();
 
         var formats = new[] { "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
-        var candles = new List<PriceCandle>();
+        var candles = new List<Candle>();
 
         foreach (var item in response.Values)
         {
             if (!DateTime.TryParseExact(
                     item.DateTime, formats,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    System.Globalization.DateTimeStyles.None, out var time))
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None, out var time))
             {
                 continue;
             }
 
-            candles.Add(new PriceCandle
+            candles.Add(new Candle
             {
-                TimeUtc = time,
-                Open = (double)item.Open,
-                High = (double)item.High,
-                Low = (double)item.Low,
-                Close = (double)item.Close,
-                Volume = 0
+                Time = time,
+                Symbol = symbol,
+                Open = (decimal)item.Open,
+                High = (decimal)item.High,
+                Low = (decimal)item.Low,
+                Close = (decimal)item.Close
             });
         }
 
-        return candles.OrderBy(x => x.TimeUtc).ToList();
+        return candles.OrderBy(x => x.Time).ToList();
     }
 
     private static ForexTradeSignal Wait(string symbol, string reason)
@@ -349,16 +520,18 @@ public class CoreForexSignalService : IForexSignalService
         {
             Symbol = symbol,
             Direction = "WAIT",
+            Bias = "NEUTRAL",
             Confidence = 0,
             Grade = "NO_TRADE",
-            Message = $"{symbol} EMA50+%R WAIT",
+            Message = $"{symbol} Cassandra WAIT",
+            BiasNote = reason,
             Reasons = new List<string> { reason },
             StrategyResults = new List<ForexStrategyResult>
             {
                 new ForexStrategyResult
                 {
-                    StrategyName = "EMA50_WILLIAMS_R_M30",
-                    Direction = "WAIT",
+                    StrategyName = "CASSANDRA_XAU_M15",
+                    Direction = "FILTER",
                     Score = 0,
                     MaxScore = 100,
                     IsConfirmed = false,
@@ -369,30 +542,36 @@ public class CoreForexSignalService : IForexSignalService
         };
     }
 
+    private static int GetDigits(string symbol)
+    {
+        var s = symbol.ToUpperInvariant();
+        if (s.Contains("JPY")) return 3;
+        if (s.Contains("XAU")) return 2;
+        if (s.Contains("BTC") || s.Contains("ETH")) return 2;
+        if (s.Contains("USOIL")) return 2;
+        return 5;   // standart forex (EUR/USD, GBP/USD və s.)
+    }
+
     private static decimal RoundPrice(string symbol, decimal price)
         => Math.Round(price, GetDigits(symbol));
 
-    private static string FormatPrice(double price)
-        => price.ToString("0.#####", System.Globalization.CultureInfo.InvariantCulture);
-
-    private static int GetDigits(string symbol)
+    private static string FormatPrice(string symbol, decimal price)
     {
-        symbol = symbol.ToUpperInvariant();
-        if (symbol.Contains("JPY")) return 3;
-        if (symbol.Contains("XAU")) return 2;
-        if (symbol.Contains("BTC") || symbol.Contains("ETH")) return 2;
-        if (symbol.Contains("USOIL")) return 2;
-        return 5;
+        var digits = GetDigits(symbol);
+        var fmt = "0." + new string('0', digits);
+        return price.ToString(fmt, CultureInfo.InvariantCulture);
     }
 
-    private static decimal GetPipSize(string symbol)
+    private sealed class SwingPoint
     {
-        symbol = symbol.ToUpperInvariant();
-        if (symbol.Contains("JPY")) return 0.01m;
-        if (symbol.Contains("XAU")) return 0.10m;
-        if (symbol.Contains("BTC")) return 1m;
-        if (symbol.Contains("ETH")) return 0.10m;
-        if (symbol.Contains("USOIL")) return 0.01m;
-        return 0.0001m;
+        public int Index { get; set; }
+        public decimal Price { get; set; }
+        public string Kind { get; set; } = string.Empty;
+    }
+
+    private sealed class LevelCluster
+    {
+        public decimal Price { get; set; }
+        public int Touches { get; set; }
     }
 }

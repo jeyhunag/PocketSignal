@@ -79,7 +79,7 @@ public class ForexController : ControllerBase
                 result.Message,
                 cancellationToken);
 
-            await _forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
+            // Cassandra order/trade vermir — trade result tracker çağırılmır.
 
             return Ok(new
             {
@@ -88,16 +88,12 @@ public class ForexController : ControllerBase
                 savedSignalId,
 
                 symbol = signal.Symbol,
-                direction = signal.Direction,
-                entry = signal.EntryPrice,
-                stopLoss = signal.StopLoss,
-                takeProfit1 = signal.TakeProfit1,
-                takeProfit2 = signal.TakeProfit2,
-                riskPips = signal.RiskPips,
-                rewardPips1 = signal.RewardPips1,
-                rewardPips2 = signal.RewardPips2,
-                riskReward1 = signal.RiskReward1,
-                riskReward2 = signal.RiskReward2,
+                bias = signal.Bias,
+                sellZones = signal.SellZones,
+                buyZones = signal.BuyZones,
+                decisionPoint = signal.DecisionPoint,
+                nearestZone = signal.NearestZone,
+                lastPrice = signal.LastPrice,
                 confidence = signal.Confidence,
                 grade = signal.Grade,
                 message = signal.Message,

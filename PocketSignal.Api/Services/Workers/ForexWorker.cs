@@ -86,10 +86,7 @@ public class ForexWorker : BackgroundService
         var forexSignalDatabaseService =
             scope.ServiceProvider.GetRequiredService<IForexSignalDatabaseService>();
 
-        var forexTradeResultTracker =
-            scope.ServiceProvider.GetRequiredService<IForexTradeResultTracker>();
-
-        await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
+        // Cassandra Entry/SL/TP vermir — trade result tracker söndürülüb.
 
         foreach (var symbol in symbols)
         {
@@ -143,8 +140,6 @@ public class ForexWorker : BackgroundService
                     symbol);
             }
         }
-
-        await forexTradeResultTracker.EvaluateOpenTradesAsync(cancellationToken);
     }
 
     private static List<string> GetActiveForexSymbols(
@@ -152,6 +147,7 @@ public class ForexWorker : BackgroundService
     {
         var result = new List<string>();
 
+        // Seçilmiş cütləri əlavə et (checkbox).
         if (settings.ForexActiveSymbols != null)
         {
             foreach (var symbol in settings.ForexActiveSymbols)
@@ -170,8 +166,12 @@ public class ForexWorker : BackgroundService
             result.Add(settings.ForexActiveSymbol);
         }
 
-        if (result.Count == 0)
-            result.Add("GBP/JPY");
+        // === QIZIL HƏMİŞƏ İŞLƏSİN ===
+        // XAU/USD checkbox seçilsə də, seçilməsə də hər zaman analiz olunur (Cassandra).
+        // Digər cütlər yalnız seçiləndə işləyir.
+        const string gold = "XAU/USD";
+        if (!result.Any(s => s.Equals(gold, StringComparison.OrdinalIgnoreCase)))
+            result.Insert(0, gold);
 
         return result;
     }
