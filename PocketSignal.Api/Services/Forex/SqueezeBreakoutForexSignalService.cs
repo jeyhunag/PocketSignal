@@ -50,6 +50,7 @@ public class SqueezeBreakoutForexSignalService : IForexSignalService
 
     public async Task<ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         var response = await _marketDataService.GetCandlesAsync(

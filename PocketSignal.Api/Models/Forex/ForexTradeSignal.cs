@@ -70,4 +70,7 @@ public class ForexTradeSignal
     // BUY bias-da yuxarıdakı güclü resistance, SELL bias-da aşağıdakı güclü support.
     // Yalnız həqiqətən güclü tərs zona varsa >0 olur, yoxdursa 0.
     public decimal CounterZone { get; set; }
+
+    // Analiz timeframe-i ("1min", "5min", "15min") — şəkil eyni TF ilə çəkilsin.
+    public string Timeframe { get; set; } = "15min";
 }

@@ -22,6 +22,7 @@ public class XauUsdScalpingSignalService : IForexSignalService
 
     public async Task<ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         symbol = "XAU/USD";

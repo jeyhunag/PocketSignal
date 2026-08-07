@@ -300,6 +300,9 @@ public class AdminController : ControllerBase
 
         var binaryChecked = settings.BinaryEnabled ? "checked" : "";
         var forexChecked = settings.ForexEnabled ? "checked" : "";
+        var tf1Checked = settings.ForexTimeframe == "1min" ? "checked" : "";
+        var tf5Checked = settings.ForexTimeframe == "5min" ? "checked" : "";
+        var tf15Checked = (settings.ForexTimeframe == "15min" || string.IsNullOrWhiteSpace(settings.ForexTimeframe)) ? "checked" : "";
 
         var mt5ActiveChecked = settings.Mt5AutoTradeEnabled ? "checked" : "";
         var mt5PassiveChecked = settings.Mt5AutoTradeEnabled ? "" : "checked";
@@ -657,6 +660,13 @@ public class AdminController : ControllerBase
                 Bir və ya bir neçə Forex / Gold / Crypto cütü seçə bilərsən.
             </p>
 
+            <p class="hint" style="margin-top:12px;">Signal timeframe (analiz + interval):</p>
+            <div class="timeframe-row" style="display:flex; gap:16px; margin-bottom:12px;">
+                <label><input type="radio" name="forexTimeframe" value="1min" {{tf1Checked}} /> 1M (15 dəq siqnal)</label>
+                <label><input type="radio" name="forexTimeframe" value="5min" {{tf5Checked}} /> 5M (30 dəq siqnal)</label>
+                <label><input type="radio" name="forexTimeframe" value="15min" {{tf15Checked}} /> 15M (30 dəq siqnal)</label>
+            </div>
+
             <div class="symbols">
                 {{BuildCheckboxes("forexActiveSymbols", settings.ForexSymbols, settings.ForexActiveSymbols)}}
             </div>
@@ -927,6 +937,9 @@ async function saveSettings() {
     const mt5MaxTradesPerDay = Number(document.getElementById("mt5MaxTradesPerDay").value);
     const mt5OnePositionPerSymbol = document.getElementById("mt5OnePositionPerSymbol").checked;
 
+    const forexTimeframeEl = document.querySelector('input[name="forexTimeframe"]:checked');
+    const forexTimeframe = forexTimeframeEl ? forexTimeframeEl.value : "15min";
+
     const response = await fetch("/admin/settings", {
         method: "POST",
         headers: {
@@ -938,6 +951,7 @@ async function saveSettings() {
             forexEnabled,
             forexActiveSymbol,
             forexActiveSymbols,
+            forexTimeframe,
             mt5AutoTradeEnabled,
             mt5LotSize,
             mt5TakeProfitMode,

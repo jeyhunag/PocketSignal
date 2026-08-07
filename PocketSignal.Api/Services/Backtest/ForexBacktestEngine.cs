@@ -89,7 +89,7 @@ public class ForexBacktestEngine
             ForexTradeSignal signal;
             try
             {
-                signal = await strategy.AnalyzeAsync(symbol, cancellationToken);
+                signal = await strategy.AnalyzeAsync(symbol, "15min", cancellationToken);
             }
             catch
             {

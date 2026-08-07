@@ -6,5 +6,6 @@ public interface IForexSignalService
 {
     Task<ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default);
 }

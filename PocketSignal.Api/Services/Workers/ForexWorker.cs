@@ -46,10 +46,13 @@ public class ForexWorker : BackgroundService
                 _logger.LogError(ex, "ForexWorker xetasi bas verdi.");
             }
 
-            var intervalSeconds = _configuration.GetValue<int>("ForexWorker:IntervalSeconds");
+            // İnterval timeframe-ə görə: M1 → 15 dəqiqə, M5/M15 → 30 dəqiqə.
+            var settingsForInterval = await _adminSettingsService.GetAsync(stoppingToken);
+            var tf = string.IsNullOrWhiteSpace(settingsForInterval.ForexTimeframe)
+                ? "15min"
+                : settingsForInterval.ForexTimeframe;
 
-            if (intervalSeconds <= 0)
-                intervalSeconds = 300;
+            var intervalSeconds = tf == "1min" ? 900 : 1800;
 
             await Task.Delay(
                 TimeSpan.FromSeconds(intervalSeconds),
@@ -88,6 +91,11 @@ public class ForexWorker : BackgroundService
 
         // Cassandra Entry/SL/TP vermir — trade result tracker söndürülüb.
 
+        // Admin paneldən seçilmiş timeframe (1min/5min/15min).
+        var timeframe = string.IsNullOrWhiteSpace(settings.ForexTimeframe)
+            ? "15min"
+            : settings.ForexTimeframe;
+
         foreach (var symbol in symbols)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -97,6 +105,7 @@ public class ForexWorker : BackgroundService
             {
                 var signal = await forexSignalService.AnalyzeAsync(
                     symbol,
+                    timeframe,
                     cancellationToken);
 
                 var result = await forexNotificationService.NotifyIfValidSignalAsync(

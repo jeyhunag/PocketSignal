@@ -8,6 +8,8 @@ public class AdminRuntimeSettingsUpdateRequest
 
     public bool ForexEnabled { get; set; }
 
+    public string ForexTimeframe { get; set; } = "15min";
+
     // Köhnə uyğunluq üçün qalır.
     public string ForexActiveSymbol { get; set; } = "GBP/JPY";
 

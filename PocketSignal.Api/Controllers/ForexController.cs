@@ -35,6 +35,7 @@ public class ForexController : ControllerBase
         {
             var signal = await _forexSignalService.AnalyzeAsync(
                 symbol,
+                "15min",
                 cancellationToken);
 
             return Ok(signal);
@@ -50,6 +51,7 @@ public class ForexController : ControllerBase
         {
             var signal = await _forexSignalService.AnalyzeAsync(
                 symbol,
+                "15min",
                 cancellationToken);
 
             var message = ForexMessageFormatter.Format(signal);
@@ -67,6 +69,7 @@ public class ForexController : ControllerBase
         {
             var signal = await _forexSignalService.AnalyzeAsync(
                 symbol,
+                "15min",
                 cancellationToken);
 
             var result = await _forexNotificationService.NotifyIfValidSignalAsync(

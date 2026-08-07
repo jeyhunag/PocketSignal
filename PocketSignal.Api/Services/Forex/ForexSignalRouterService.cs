@@ -16,9 +16,10 @@ public class ForexSignalRouterService : IForexSignalService
 
     public Task<Models.Forex.ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         // Qızıl da, digər cütlər də eyni Cassandra sistemi ilə analiz olunur.
-        return _coreForexSignalService.AnalyzeAsync(symbol, cancellationToken);
+        return _coreForexSignalService.AnalyzeAsync(symbol, timeframe, cancellationToken);
     }
 }

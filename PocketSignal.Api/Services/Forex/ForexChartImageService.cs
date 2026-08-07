@@ -39,7 +39,7 @@ public class ForexChartImageService : IForexChartImageService
         {
             var response = await _marketDataService.GetCandlesAsync(
                 signal.Symbol,
-                "15min",
+                string.IsNullOrWhiteSpace(signal.Timeframe) ? "15min" : signal.Timeframe,
                 150,
                 cancellationToken);
 
@@ -216,7 +216,7 @@ public class ForexChartImageService : IForexChartImageService
             Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
         };
         canvas.DrawText(
-            $"M15 chart | {signal.Symbol} | Created UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}",
+            $"{TfLabel(signal.Timeframe)} chart | {signal.Symbol} | Created UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}",
             70, height - 24, footerPaint);
 
         using var image = SKImage.FromBitmap(bitmap);
@@ -588,6 +588,13 @@ public class ForexChartImageService : IForexChartImageService
 
         return candles.OrderBy(x => x.Time).ToList();
     }
+
+    private static string TfLabel(string tf) => tf switch
+    {
+        "1min" => "M1",
+        "5min" => "M5",
+        _ => "M15"
+    };
 
     private static string InstrumentName(string symbol)
     {

@@ -32,6 +32,7 @@ public class ForexSignalService : IForexSignalService
 
     public async Task<ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         var h1Response = await _marketDataService.GetCandlesAsync(symbol, "1h", 200, cancellationToken);

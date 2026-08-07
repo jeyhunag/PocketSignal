@@ -27,31 +27,35 @@ public class CoreForexSignalService : IForexSignalService
 {
     private const string TargetSymbol = "XAU/USD";
 
-    // M15 analiz.
-    private const string Interval = "15min";
     private const int CandleCount = 300;
-
-    // Trend üçün son neçə M15 şama baxılsın (~ 200 şam = ~2 gün).
-    private const int TrendLookback = 60;
-
-    // Swing (dönüş) nöqtəsi üçün sol/sağ qonşu sayı — M15-də bir az daha geniş.
-    private const int SwingLeft = 4;
-    private const int SwingRight = 4;
-
-    // Zona qruplaşdırma toleransı: qiymətin bu faizi qədər yaxın swing-lər eyni zona sayılır.
-    // XAU üçün ~0.0015 (0.15%) təqribən 6$ (4000-də) — real zona genişliyi.
-    private const decimal ZoneTolerancePct = 0.0015m;
-
-    // Zona ən azı neçə dəfə toxunulmalıdır ki, "güclü" sayılsın.
 
     // Neçə zona göstərilsin — real support/resistance neçə varsa (maksimum bu qədər).
     private const int MaxZones = 5;
 
     // Biasa TƏRS zona üçün minimum toxunuş sayı — bundan az olsa göstərilmir.
     // 3+ toxunuş = həqiqətən güclü səviyyə (2 çox zəifdir, uydurma olar).
-    private const int MinCounterTouches = 3;   // tərs zona üçün minimum toxunuş (güclü olsun)
+    private const int MinCounterTouches = 3;
 
-    // Yaxın zonalar (tez giriş) + uzaq güclü zonalar (təhlükəsiz giriş) — hər ikisi saxlanır.
+    // ==================== TIMEFRAME PARAMETRLƏRİ ====================
+    // M15 optimaldır (toxunulmur). M1/M5 M15 keyfiyyətinə uyğunlaşdırılıb:
+    // kiçik TF-də daha çox şam + daha geniş swing (noise-a qarşı) + daha dar tolerans.
+    private sealed record TfParams(
+        string Interval,
+        int TrendLookback,
+        int SwingLeft,
+        int SwingRight,
+        decimal ZoneTolerancePct);
+
+    private static TfParams GetTfParams(string timeframe)
+    {
+        return timeframe switch
+        {
+            "1min" => new TfParams("1min", 120, 5, 5, 0.0008m),
+            "5min" => new TfParams("5min", 80, 5, 5, 0.0012m),
+            _ => new TfParams("15min", 60, 4, 4, 0.0015m)   // M15 — OPTIMAL, toxunulmaz
+        };
+    }
+
 
     private readonly IMarketDataService _marketDataService;
 
@@ -63,27 +67,31 @@ public class CoreForexSignalService : IForexSignalService
 
     public async Task<ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         // Gələn symbol analiz olunur (XAU/USD, EUR/USD və s.) — hansı seçilibsə.
         if (string.IsNullOrWhiteSpace(symbol))
             symbol = TargetSymbol;
 
+        // Timeframe-ə görə parametrlər (M15 optimal, M1/M5 uyğunlaşdırılıb).
+        var tf = GetTfParams(timeframe);
+
         var response = await _marketDataService.GetCandlesAsync(
             symbol,
-            Interval,
+            tf.Interval,
             CandleCount,
             cancellationToken);
 
         var candles = MapCandles(response, symbol);
 
-        if (candles.Count < TrendLookback + 30)
-            return Wait(symbol, "Cassandra analizi üçün kifayət qədər M15 candle yoxdur.");
+        if (candles.Count < tf.TrendLookback + 30)
+            return Wait(symbol, $"Cassandra analizi üçün kifayət qədər {tf.Interval} candle yoxdur.");
 
         var lastPrice = candles[^1].Close;
 
         // ===== SWING nöqtələri =====
-        var swings = FindSwings(candles, SwingLeft, SwingRight);
+        var swings = FindSwings(candles, tf.SwingLeft, tf.SwingRight);
 
         var swingHighs = swings.Where(x => x.Kind == "HIGH").OrderBy(x => x.Index).ToList();
         var swingLows = swings.Where(x => x.Kind == "LOW").OrderBy(x => x.Index).ToList();
@@ -92,7 +100,7 @@ public class CoreForexSignalService : IForexSignalService
             return Wait(symbol, "Cassandra: kifayət qədər swing nöqtəsi tapılmadı.");
 
         // ===== 1) BIAS (struktur qırılması əsasında) =====
-        var bias = DetermineBias(candles, swingHighs, swingLows);
+        var bias = DetermineBias(candles, swingHighs, swingLows, tf.TrendLookback);
 
         // ===== 2) ZONALAR — real support/resistance (swing əsaslı) =====
         // Sadə və dürüst: zona = qiymətin dəfələrlə dönüş etdiyi swing səviyyəsi.
@@ -101,8 +109,8 @@ public class CoreForexSignalService : IForexSignalService
         var sellZones = new List<decimal>();
         var buyZones = new List<decimal>();
 
-        var highClusters = ClusterLevels(swingHighs.Select(x => x.Price).ToList(), lastPrice);
-        var lowClusters = ClusterLevels(swingLows.Select(x => x.Price).ToList(), lastPrice);
+        var highClusters = ClusterLevelsTol(swingHighs.Select(x => x.Price).ToList(), lastPrice, tf.ZoneTolerancePct);
+        var lowClusters = ClusterLevelsTol(swingLows.Select(x => x.Price).ToList(), lastPrice, tf.ZoneTolerancePct);
 
         if (bias == "SELL")
         {
@@ -201,6 +209,7 @@ public class CoreForexSignalService : IForexSignalService
             DecisionPoint = RoundPrice(symbol, decisionPoint),
             NearestZone = RoundPrice(symbol, nearestZone),
             CounterZone = counterZone > 0 ? RoundPrice(symbol, counterZone) : 0,
+            Timeframe = tf.Interval,
             LastPrice = RoundPrice(symbol, lastPrice),
             BiasNote = note,
 
@@ -237,7 +246,8 @@ public class CoreForexSignalService : IForexSignalService
     private static string DetermineBias(
         List<Candle> candles,
         List<SwingPoint> swingHighs,
-        List<SwingPoint> swingLows)
+        List<SwingPoint> swingLows,
+        int trendLookback)
     {
         var recentHighs = swingHighs.TakeLast(2).ToList();
         var recentLows = swingLows.TakeLast(2).ToList();
@@ -257,7 +267,7 @@ public class CoreForexSignalService : IForexSignalService
         }
 
         var lastClose = candles[^1].Close;
-        var lookback = Math.Min(TrendLookback, candles.Count - 1);
+        var lookback = Math.Min(trendLookback, candles.Count - 1);
         var pastClose = candles[^(lookback + 1)].Close;
         var priceTrend = lastClose > pastClose ? "UP" : lastClose < pastClose ? "DOWN" : "FLAT";
 
@@ -350,15 +360,16 @@ public class CoreForexSignalService : IForexSignalService
     /// Hər zona: orta qiymət + neçə swing ora düşüb (Touches).
     /// Çox toxunulan səviyyə = güclü support/resistance.
     /// </summary>
-    private static List<LevelCluster> ClusterLevels(
+    private static List<LevelCluster> ClusterLevelsTol(
         List<decimal> levels,
-        decimal referencePrice)
+        decimal referencePrice,
+        decimal zoneTolerancePct)
     {
         var result = new List<LevelCluster>();
         if (levels.Count == 0)
             return result;
 
-        var tolerance = referencePrice * ZoneTolerancePct;
+        var tolerance = referencePrice * zoneTolerancePct;
         if (tolerance <= 0)
             tolerance = 1m;
 

@@ -41,6 +41,7 @@ public class EmaPullbackForexSignalService : IForexSignalService
 
     public async Task<ForexTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         // Tək timeframe oxuyuruq. Backtest "1min" slotuna M30 datası qoyur.

@@ -30,6 +30,9 @@ public class AdminRuntimeSettings
 
     public bool ForexEnabled { get; set; } = true;
 
+    // Cassandra analiz timeframe-i: "1min", "5min", "15min".
+    public string ForexTimeframe { get; set; } = "15min";
+
     // Köhnə sistemlə uyğunluq üçün qalır.
     public string ForexActiveSymbol { get; set; } = "GBP/JPY";
 
