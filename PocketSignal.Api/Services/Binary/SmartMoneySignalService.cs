@@ -20,6 +20,7 @@ public class SmartMoneySignalService : ISmartSignalService
 
     public async Task<SmartTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         var m5Response = await _marketDataService.GetCandlesAsync(

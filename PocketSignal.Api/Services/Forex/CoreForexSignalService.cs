@@ -1,4 +1,5 @@
 ﻿using System.Globalization;
+using Microsoft.Extensions.Caching.Memory;
 using PocketSignal.Api.Models;
 using PocketSignal.Api.Models.Analysis;
 using PocketSignal.Api.Models.Common;
@@ -58,11 +59,14 @@ public class CoreForexSignalService : IForexSignalService
 
 
     private readonly IMarketDataService _marketDataService;
+    private readonly IMemoryCache _cache;
 
     public CoreForexSignalService(
-        IMarketDataService marketDataService)
+        IMarketDataService marketDataService,
+        IMemoryCache cache)
     {
         _marketDataService = marketDataService;
+        _cache = cache;
     }
 
     public async Task<ForexTradeSignal> AnalyzeAsync(
@@ -76,6 +80,12 @@ public class CoreForexSignalService : IForexSignalService
 
         // Timeframe-ə görə parametrlər (M15 optimal, M1/M5 uyğunlaşdırılıb).
         var tf = GetTfParams(timeframe);
+
+        // === BAZAR AÇIQMI? ===
+        // Forex/qızıl/neft həftəsonu bağlıdır. Kripto 24/7 açıqdır.
+        // Bazar bağlıdırsa analiz/siqnal yoxdur.
+        if (!IsMarketOpen(symbol, DateTime.UtcNow))
+            return Wait(symbol, $"{symbol} bazarı hazırda bağlıdır (həftəsonu). Siqnal yoxdur.");
 
         var response = await _marketDataService.GetCandlesAsync(
             symbol,
@@ -100,7 +110,22 @@ public class CoreForexSignalService : IForexSignalService
             return Wait(symbol, "Cassandra: kifayət qədər swing nöqtəsi tapılmadı.");
 
         // ===== 1) BIAS (struktur qırılması əsasında) =====
-        var bias = DetermineBias(candles, swingHighs, swingLows, tf.TrendLookback);
+        var rawBias = DetermineBias(candles, swingHighs, swingLows, tf.TrendLookback);
+
+        // ===== BIAS SABİTLİYİ =====
+        // Əvvəlki bias yadda saxlanır. Yeni struktur fərqli desə də, əvvəlki şah və ya
+        // tərs zona QIRILMAYIBSA köhnə bias qalır. Yalnız qırılanda bias dəyişir.
+        // Bu, biasın hər analizdə tez-tez dəyişməsinin qarşısını alır.
+        var biasStateKey = $"cassandra:biasstate:{symbol}";
+        var bias = rawBias;
+
+        if (_cache.TryGetValue<BiasState>(biasStateKey, out var prev) && prev != null)
+        {
+            var broken = IsStructureBroken(prev, lastPrice);
+            if (!broken)
+                bias = prev.Bias;   // qırılmayıb → köhnə bias qalır
+            // qırılıbsa → rawBias (yeni) qəbul olunur
+        }
 
         // ===== 2) ZONALAR — real support/resistance (swing əsaslı) =====
         // Sadə və dürüst: zona = qiymətin dəfələrlə dönüş etdiyi swing səviyyəsi.
@@ -142,6 +167,11 @@ public class CoreForexSignalService : IForexSignalService
         var decisionPoint = DetermineDecisionPoint(
             bias, buyZones, sellZones, lowClusters, highClusters, lastPrice, swingLows, swingHighs);
 
+        // Şaha çox yaxın zonanı sil (təkrar olmasın — şah onsuz da göstərilir).
+        var dpTolerance = lastPrice * tf.ZoneTolerancePct;
+        buyZones = buyZones.Where(z => Math.Abs(z - decisionPoint) > dpTolerance).ToList();
+        sellZones = sellZones.Where(z => Math.Abs(z - decisionPoint) > dpTolerance).ToList();
+
         // ===== ƏN YAXIN ZONA =====
         var activeZones = bias == "SELL" ? sellZones : buyZones;
         var nearestZone = activeZones.Count > 0
@@ -174,7 +204,40 @@ public class CoreForexSignalService : IForexSignalService
                 counterZone = strongest.Price;
         }
 
+        // ===== HƏR ŞEYİ DONDUR (Cassandra kimi) =====
+        // Əvvəlki state var və struktur QIRILMAYIBSA — bias, zonalar, şah, tərs zona
+        // HAMISI köhnə qalır. Yalnız qiymət bir səviyyəni qıranda hər şey yenilənir.
+        // Bu, orijinal Cassandra davranışıdır: səviyyələr sabit, yalnız qiymət hərəkət edir.
+        if (_cache.TryGetValue<BiasState>(biasStateKey, out var frozen) &&
+            frozen != null &&
+            frozen.Bias != "NEUTRAL" &&
+            !IsStructureBroken(frozen, lastPrice))
+        {
+            bias = frozen.Bias;
+            sellZones = frozen.SellZones;
+            buyZones = frozen.BuyZones;
+            decisionPoint = frozen.DecisionPoint;
+            counterZone = frozen.CounterZone;
+
+            // Ən yaxın zonanı yenidən hesabla (qiymət hərəkət etdiyi üçün).
+            var activeFrozen = bias == "SELL" ? sellZones : buyZones;
+            nearestZone = activeFrozen.Count > 0
+                ? activeFrozen.OrderBy(p => Math.Abs(p - lastPrice)).First()
+                : decisionPoint;
+        }
+
         // ===== Mətn (Cassandra formatı) =====
+        // Yeni bias state-i yadda saxla (növbəti analizdə qırılma yoxlaması üçün).
+        _cache.Set(biasStateKey, new BiasState
+        {
+            Bias = bias,
+            DecisionPoint = decisionPoint,
+            CounterZone = counterZone,
+            NearestZone = nearestZone,
+            SellZones = sellZones,
+            BuyZones = buyZones
+        }, TimeSpan.FromHours(24));
+
         var note = BuildBiasNote(symbol, bias, sellZones, buyZones, decisionPoint, nearestZone, counterZone);
 
         var direction = bias == "SELL" ? "SHORT"
@@ -232,6 +295,90 @@ public class CoreForexSignalService : IForexSignalService
             },
             CreatedAtUtc = DateTime.UtcNow
         };
+    }
+
+    // ==================== BIAS SABİTLİYİ ====================
+
+    private sealed class BiasState
+    {
+        public string Bias { get; set; } = "NEUTRAL";
+        public decimal DecisionPoint { get; set; }
+        public decimal CounterZone { get; set; }
+        public decimal NearestZone { get; set; }
+        public List<decimal> SellZones { get; set; } = new();
+        public List<decimal> BuyZones { get; set; } = new();
+    }
+
+    /// <summary>
+    /// Struktur qırılıbmı? Yəni bias dəyişməlidirmi?
+    ///   BUY bias: şah (aşağıda) qırılsa (qiymət şahdan aşağı düşsə) → qırıldı.
+    ///             və ya tərs zona (yuxarıda) qırılsa (qiymət tərs zonadan yuxarı çıxsa) → qırıldı.
+    ///   SELL bias: şah (yuxarıda) qırılsa (qiymət şahdan yuxarı çıxsa) → qırıldı.
+    ///             və ya tərs zona (aşağıda) qırılsa (qiymət tərs zonadan aşağı düşsə) → qırıldı.
+    /// </summary>
+    private static bool IsStructureBroken(BiasState prev, decimal lastPrice)
+    {
+        if (prev.Bias == "BUY")
+        {
+            // Şah aşağıda idi — qiymət ondan aşağı düşübsə qırıldı.
+            if (prev.DecisionPoint > 0 && lastPrice < prev.DecisionPoint)
+                return true;
+            // Tərs zona yuxarıda idi — qiymət ondan yuxarı çıxıbsa qırıldı.
+            if (prev.CounterZone > 0 && lastPrice > prev.CounterZone)
+                return true;
+        }
+        else if (prev.Bias == "SELL")
+        {
+            // Şah yuxarıda idi — qiymət ondan yuxarı çıxıbsa qırıldı.
+            if (prev.DecisionPoint > 0 && lastPrice > prev.DecisionPoint)
+                return true;
+            // Tərs zona aşağıda idi — qiymət ondan aşağı düşübsə qırıldı.
+            if (prev.CounterZone > 0 && lastPrice < prev.CounterZone)
+                return true;
+        }
+        else
+        {
+            // NEUTRAL idisə, sərbəst dəyişsin.
+            return true;
+        }
+
+        return false;
+    }
+
+    // ==================== BAZAR SAATLARI ====================
+
+    /// <summary>
+    /// Bazar açıqmı?
+    ///   • Kripto (BTC, ETH): həmişə açıq (24/7).
+    ///   • Forex / qızıl (XAU) / neft (USOIL): həftəsonu bağlı.
+    ///     Açılış: Bazar ertəsi 00:00 UTC. Bağlanış: Cümə 22:00 UTC.
+    ///     (Şənbə tam bağlı; Cümə 22:00-dan sonra və Bazar 22:00-a qədər bağlı.)
+    /// </summary>
+    private static bool IsMarketOpen(string symbol, DateTime utcNow)
+    {
+        var s = symbol.ToUpperInvariant();
+
+        // Kripto həmişə açıq.
+        if (s.Contains("BTC") || s.Contains("ETH"))
+            return true;
+
+        var day = utcNow.DayOfWeek;
+        var hour = utcNow.Hour;
+
+        // Şənbə: tam bağlı.
+        if (day == DayOfWeek.Saturday)
+            return false;
+
+        // Cümə: 22:00 UTC-dən sonra bağlı.
+        if (day == DayOfWeek.Friday && hour >= 22)
+            return false;
+
+        // Bazar: 22:00 UTC-yə qədər bağlı (açılış axşam başlayır).
+        if (day == DayOfWeek.Sunday && hour < 22)
+            return false;
+
+        // Qalan vaxt (B.e - Cümə gündüz) açıq.
+        return true;
     }
 
     // ==================== BIAS (struktur qırılması) ====================

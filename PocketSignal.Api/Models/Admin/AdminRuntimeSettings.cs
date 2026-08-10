@@ -33,6 +33,9 @@ public class AdminRuntimeSettings
     // Cassandra analiz timeframe-i: "1min", "5min", "15min".
     public string ForexTimeframe { get; set; } = "15min";
 
+    // Binary Cassandra timeframe-i.
+    public string BinaryTimeframe { get; set; } = "15min";
+
     // Köhnə sistemlə uyğunluq üçün qalır.
     public string ForexActiveSymbol { get; set; } = "GBP/JPY";
 

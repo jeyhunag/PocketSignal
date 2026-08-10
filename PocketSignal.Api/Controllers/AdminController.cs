@@ -299,6 +299,9 @@ public class AdminController : ControllerBase
             settings.BinaryActiveSymbol);
 
         var binaryChecked = settings.BinaryEnabled ? "checked" : "";
+        var btf1Checked = settings.BinaryTimeframe == "1min" ? "checked" : "";
+        var btf5Checked = settings.BinaryTimeframe == "5min" ? "checked" : "";
+        var btf15Checked = (settings.BinaryTimeframe == "15min" || string.IsNullOrWhiteSpace(settings.BinaryTimeframe)) ? "checked" : "";
         var forexChecked = settings.ForexEnabled ? "checked" : "";
         var tf1Checked = settings.ForexTimeframe == "1min" ? "checked" : "";
         var tf5Checked = settings.ForexTimeframe == "5min" ? "checked" : "";
@@ -643,6 +646,13 @@ public class AdminController : ControllerBase
                 Binary aktivdir
             </label>
 
+            <p class="hint" style="margin-top:12px;">Signal timeframe (analiz + interval):</p>
+            <div class="timeframe-row" style="display:flex; gap:16px; margin-bottom:12px;">
+                <label><input type="radio" name="binaryTimeframe" value="1min" {{btf1Checked}} /> 1M (15 dəq siqnal)</label>
+                <label><input type="radio" name="binaryTimeframe" value="5min" {{btf5Checked}} /> 5M (30 dəq siqnal)</label>
+                <label><input type="radio" name="binaryTimeframe" value="15min" {{btf15Checked}} /> 15M (30 dəq siqnal)</label>
+            </div>
+
             <div class="symbols">
                 {{binaryRadios}}
             </div>
@@ -940,6 +950,9 @@ async function saveSettings() {
     const forexTimeframeEl = document.querySelector('input[name="forexTimeframe"]:checked');
     const forexTimeframe = forexTimeframeEl ? forexTimeframeEl.value : "15min";
 
+    const binaryTimeframeEl = document.querySelector('input[name="binaryTimeframe"]:checked');
+    const binaryTimeframe = binaryTimeframeEl ? binaryTimeframeEl.value : "15min";
+
     const response = await fetch("/admin/settings", {
         method: "POST",
         headers: {
@@ -948,6 +961,7 @@ async function saveSettings() {
         body: JSON.stringify({
             binaryEnabled,
             binaryActiveSymbol,
+            binaryTimeframe,
             forexEnabled,
             forexActiveSymbol,
             forexActiveSymbols,

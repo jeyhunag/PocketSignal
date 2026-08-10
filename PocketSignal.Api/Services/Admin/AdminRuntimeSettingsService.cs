@@ -94,6 +94,10 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
                 ? request.ForexTimeframe
                 : "15min";
 
+            settings.BinaryTimeframe = request.BinaryTimeframe is "1min" or "5min" or "15min"
+                ? request.BinaryTimeframe
+                : "15min";
+
             var normalizedBinaryActiveSymbol = NormalizeSymbol(
                 request.BinaryActiveSymbol);
 

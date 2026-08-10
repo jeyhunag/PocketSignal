@@ -67,6 +67,7 @@ public class MarketController : ControllerBase
         {
             var signal = await _smartSignalService.AnalyzeAsync(
                 symbol,
+                "15min",
                 cancellationToken);
 
             return Ok(signal);
@@ -82,6 +83,7 @@ public class MarketController : ControllerBase
         {
             var signal = await _smartSignalService.AnalyzeAsync(
                 symbol,
+                "15min",
                 cancellationToken);
 
             var message = SignalMessageFormatter.Format(signal);
@@ -99,6 +101,7 @@ public class MarketController : ControllerBase
         {
             var signal = await _smartSignalService.AnalyzeAsync(
                 symbol,
+                "15min",
                 cancellationToken);
 
             var result = await _signalNotificationService.NotifyIfValidSignalAsync(

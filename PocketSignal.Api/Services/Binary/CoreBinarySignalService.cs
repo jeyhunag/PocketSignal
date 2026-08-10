@@ -39,6 +39,7 @@ public class CoreBinarySignalService : ISmartSignalService
 
     public async Task<SmartTradeSignal> AnalyzeAsync(
         string symbol,
+        string timeframe = "15min",
         CancellationToken cancellationToken = default)
     {
         var todayTrades = _signalResultTracker.GetTodayTrades();

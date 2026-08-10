@@ -42,10 +42,13 @@ public class SignalWorker : BackgroundService
                 _logger.LogError(ex, "SignalWorker xetasi bas verdi.");
             }
 
-            var intervalSeconds = _configuration.GetValue<int>("SignalWorker:IntervalSeconds");
+            // İnterval binary timeframe-ə görə: M1 → 15 dəqiqə, M5/M15 → 30 dəqiqə.
+            var settingsForInterval = await _adminSettingsService.GetAsync(stoppingToken);
+            var btf = string.IsNullOrWhiteSpace(settingsForInterval.BinaryTimeframe)
+                ? "15min"
+                : settingsForInterval.BinaryTimeframe;
 
-            if (intervalSeconds <= 0)
-                intervalSeconds = 60;
+            var intervalSeconds = btf == "1min" ? 900 : 1800;
 
             await Task.Delay(TimeSpan.FromSeconds(intervalSeconds), stoppingToken);
         }
@@ -84,8 +87,13 @@ public class SignalWorker : BackgroundService
 
         await signalResultTracker.EvaluateDueSignalsAsync(cancellationToken);
 
+        var binaryTimeframe = string.IsNullOrWhiteSpace(settings.BinaryTimeframe)
+            ? "15min"
+            : settings.BinaryTimeframe;
+
         var signal = await smartSignalService.AnalyzeAsync(
             symbol,
+            binaryTimeframe,
             cancellationToken);
 
         var result = await notificationService.NotifyIfValidSignalAsync(

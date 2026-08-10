@@ -43,7 +43,10 @@ public class ForexBacktestEngine
         IForexSignalService strategy = strategyName.ToLowerInvariant() switch
         {
             "ema" => new EmaPullbackForexSignalService(_replay),
-            _ => new CoreForexSignalService(_replay)
+            _ => new CoreForexSignalService(
+                _replay,
+                new Microsoft.Extensions.Caching.Memory.MemoryCache(
+                    new Microsoft.Extensions.Caching.Memory.MemoryCacheOptions()))
         };
 
         var m1Series = _replay.GetFullSeries("1min")
