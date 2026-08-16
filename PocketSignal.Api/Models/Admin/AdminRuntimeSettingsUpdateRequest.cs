@@ -18,6 +18,8 @@ public class AdminRuntimeSettingsUpdateRequest
     // Yeni multi-select forex symbols.
     public List<string> ForexActiveSymbols { get; set; } = new();
 
+    public List<string> BinaryActiveSymbols { get; set; } = new();
+
     public bool Mt5AutoTradeEnabled { get; set; }
 
     public double Mt5LotSize { get; set; } = 0.02;

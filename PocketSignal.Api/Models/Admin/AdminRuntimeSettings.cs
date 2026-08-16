@@ -6,6 +6,9 @@ public class AdminRuntimeSettings
 
     public string BinaryActiveSymbol { get; set; } = "EUR/USD";
 
+    // Çoxlu seçim (forex kimi) — birdən çox binary cütü.
+    public List<string> BinaryActiveSymbols { get; set; } = new();
+
     public List<string> BinarySymbols { get; set; } = new()
     {
         "EUR/USD",

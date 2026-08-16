@@ -7,7 +7,6 @@ namespace PocketSignal.Api.Services.Binary;
 
 public class SignalNotificationService : ISignalNotificationService
 {
-    private const int MinimumConfidence = 82;
 
     private readonly ITelegramService _telegramService;
     private readonly IBinaryChartImageService _chartImageService;
@@ -40,20 +39,7 @@ public class SignalNotificationService : ISignalNotificationService
             return (false, "Binary direction LONG/SHORT deyil, Telegram-a gonderilmedi.");
         }
 
-        if (signal.Confidence < MinimumConfidence)
-        {
-            return (false, $"Confidence {MinimumConfidence}-den asagidir, Telegram-a gonderilmedi.");
-        }
-
-        if (signal.ExpiryMinutes <= 0)
-        {
-            return (false, "ExpiryMinutes duzgun deyil, Telegram-a gonderilmedi.");
-        }
-
-        if (signal.LastClose <= 0)
-        {
-            return (false, "Entry qiymeti duzgun deyil, Telegram-a gonderilmedi.");
-        }
+        // Cassandra bias verirsə göndərilir — forex kimi, confidence yoxlaması yoxdur.
 
         // VACIB:
         // Burada expiry-ni cache key-den cixardiq.
@@ -67,7 +53,7 @@ public class SignalNotificationService : ISignalNotificationService
             return (false, $"Binary cooldown aktivdir. {signal.Symbol} ucun evvelki signalin expiry vaxti bitmeyib.");
         }
 
-        var message = SignalMessageFormatter.Format(signal);
+        var message = BuildCassandraMessage(signal);
 
         var chartImagePath = await TryCreateChartImageAsync(
             signal,
@@ -116,6 +102,23 @@ public class SignalNotificationService : ISignalNotificationService
         return sentAsPhoto
             ? (true, $"Binary signal Telegram-a chart sekli ile gonderildi. Cooldown: {cooldownMinutes} deqiqe.")
             : (true, $"Binary signal Telegram-a text kimi gonderildi. Cooldown: {cooldownMinutes} deqiqe.");
+    }
+
+    private static string BuildCassandraMessage(SmartTradeSignal signal)
+    {
+        var icon = signal.Bias == "SELL" ? "🔴" : "🟢";
+        var header = $"🏷️ Bias: {signal.Bias}\n\n";
+        var body = string.IsNullOrWhiteSpace(signal.BiasNote)
+            ? signal.Message
+            : signal.BiasNote;
+        return $"{icon} Cassandra Analysis - {InstrumentName(signal.Symbol)}\n\n{header}{body}";
+    }
+
+    private static string InstrumentName(string symbol)
+    {
+        var s = symbol.ToUpperInvariant();
+        if (s.Contains("XAU")) return "GOLD";
+        return symbol;
     }
 
     private async Task<string?> TryCreateChartImageAsync(

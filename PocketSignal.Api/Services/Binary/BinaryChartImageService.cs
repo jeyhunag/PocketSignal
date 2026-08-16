@@ -1,17 +1,22 @@
 ﻿using PocketSignal.Api.Models;
-using PocketSignal.Api.Models.Binary;
 using PocketSignal.Api.Models.Common;
+using PocketSignal.Api.Models.Binary;
 using PocketSignal.Api.Services.MarketData;
 using SkiaSharp;
-using System.Globalization;
 
 namespace PocketSignal.Api.Services.Binary;
 
+/// <summary>
+/// CASSANDRA üslubunda XAU/USD şəkli — ORİJİNAL görünüş.
+/// Ağ fon, mərkəzdə başlıq, nazik zona xətləri, yaşıl/qırmızı giriş oxları,
+/// sağda səliqəli qiymət etiketləri. M15 candlestick.
+/// </summary>
 public class BinaryChartImageService : IBinaryChartImageService
 {
     private readonly IMarketDataService _marketDataService;
     private readonly IWebHostEnvironment _environment;
     private readonly ILogger<BinaryChartImageService> _logger;
+    private string _currentSymbol = "XAU/USD";
 
     public BinaryChartImageService(
         IMarketDataService marketDataService,
@@ -27,47 +32,30 @@ public class BinaryChartImageService : IBinaryChartImageService
         SmartTradeSignal signal,
         CancellationToken cancellationToken = default)
     {
-        if (signal.Direction != "LONG" && signal.Direction != "SHORT")
-            return null;
-
-        if (signal.LastClose <= 0)
-            return null;
-
-        if (signal.ExpiryMinutes <= 0)
+        if (signal.Bias != "SELL" && signal.Bias != "BUY")
             return null;
 
         try
         {
             var response = await _marketDataService.GetCandlesAsync(
                 signal.Symbol,
-                "1min",
-                120,
+                string.IsNullOrWhiteSpace(signal.Timeframe) ? "15min" : signal.Timeframe,
+                150,
                 cancellationToken);
 
-            var candles = MapCandles(
-                response,
-                signal.Symbol);
+            var candles = MapCandles(response, signal.Symbol);
 
             if (candles.Count < 20)
             {
-                _logger.LogWarning(
-                    "Binary chart ucun kifayet qeder M1 candle yoxdur. Symbol: {Symbol}",
-                    signal.Symbol);
-
+                _logger.LogWarning("Cassandra chart üçün kifayət qədər M15 candle yoxdur.");
                 return null;
             }
 
-            return CreateChartImage(
-                signal,
-                candles.TakeLast(90).ToList());
+            return CreateChartImage(signal, candles.TakeLast(100).ToList());
         }
         catch (Exception ex)
         {
-            _logger.LogError(
-                ex,
-                "Binary chart yaradilan zaman xeta bas verdi. Symbol: {Symbol}",
-                signal.Symbol);
-
+            _logger.LogError(ex, "Cassandra chart yaradılan zaman xəta baş verdi.");
             return null;
         }
     }
@@ -76,322 +64,288 @@ public class BinaryChartImageService : IBinaryChartImageService
         SmartTradeSignal signal,
         List<Candle> candles)
     {
-        var outputDirectory = GetOutputDirectory();
+        _currentSymbol = signal.Symbol;
 
+        var outputDirectory = GetOutputDirectory();
         Directory.CreateDirectory(outputDirectory);
 
-        var safeSymbol = signal.Symbol
-            .Replace("/", "_")
-            .Replace("-", "_")
-            .Replace(" ", "_");
-
         var fileName =
-            $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_{safeSymbol}_{signal.Direction}_{signal.ExpiryMinutes}m_{Guid.NewGuid():N}.png";
+            $"{DateTime.UtcNow:yyyyMMdd_HHmmss}_XAUUSD_{signal.Bias}_{Guid.NewGuid():N}.png";
+        var filePath = Path.Combine(outputDirectory, fileName);
 
-        var filePath = Path.Combine(
-            outputDirectory,
-            fileName);
-
-        const int width = 1280;
-        const int height = 720;
+        // Orijinal Cassandra ölçüsü — dik (portrait) format.
+        const int width = 900;
+        const int height = 1050;
 
         using var bitmap = new SKBitmap(width, height);
         using var canvas = new SKCanvas(bitmap);
 
-        var background = SKColor.Parse("#0F141B");
-        var panel = SKColor.Parse("#131A22");
-        var gridColor = SKColor.Parse("#243040");
-        var textColor = SKColor.Parse("#F4F4F5");
-        var mutedTextColor = SKColor.Parse("#A1A1AA");
+        // ===== ORİJİNAL: ağ fon =====
+        var background = SKColors.White;
+        var chartBg = SKColors.White;
+        var gridColor = SKColor.Parse("#E5E7EB");        // açıq boz grid
+        var axisColor = SKColor.Parse("#374151");        // tünd boz oxlar/mətn
+        var textColor = SKColor.Parse("#111827");        // qara mətn
+        var mutedText = SKColor.Parse("#6B7280");        // boz mətn
 
-        var bullColor = SKColor.Parse("#26A69A");
-        var bearColor = SKColor.Parse("#EF5350");
+        var bullColor = SKColor.Parse("#26A69A");        // yaşıl şam
+        var bearColor = SKColor.Parse("#EF5350");        // qırmızı şam
 
-        var entryColor = SKColor.Parse("#60A5FA");
-        var longColor = SKColor.Parse("#22C55E");
-        var shortColor = SKColor.Parse("#EF4444");
-        var expiryColor = SKColor.Parse("#F59E0B");
+        var sellColor = SKColor.Parse("#DC2626");        // qırmızı — SELL/resistance
+        var buyColor = SKColor.Parse("#059669");         // yaşıl — BUY/support
+        var decisionColor = SKColor.Parse("#6B7280");    // boz — qərar nöqtəsi
 
         canvas.Clear(background);
 
-        using var panelPaint = new SKPaint
-        {
-            Color = panel,
-            IsAntialias = true
-        };
-
-        canvas.DrawRoundRect(
-            new SKRoundRect(new SKRect(24, 24, width - 24, height - 24), 20, 20),
-            panelPaint);
-
+        // ===== BAŞLIQ (mərkəzdə) =====
         using var titlePaint = new SKPaint
         {
             Color = textColor,
             IsAntialias = true,
-            TextSize = 34,
+            TextSize = 22,
+            TextAlign = SKTextAlign.Center,
             Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
         };
 
-        using var smallTextPaint = new SKPaint
+        using var subtitlePaint = new SKPaint
         {
-            Color = mutedTextColor,
+            Color = mutedText,
             IsAntialias = true,
-            TextSize = 20,
+            TextSize = 15,
+            TextAlign = SKTextAlign.Center,
             Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
         };
 
-        using var badgePaint = new SKPaint
-        {
-            Color = signal.Direction == "LONG" ? longColor : shortColor,
-            IsAntialias = true
-        };
-
-        using var badgeTextPaint = new SKPaint
-        {
-            Color = SKColors.White,
-            IsAntialias = true,
-            TextSize = 20,
-            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
-        };
-
-        var title = $"{signal.Symbol} BINARY {signal.Direction}";
-        var subtitle =
-            $"Confidence: {signal.Confidence}%   Expiry: {signal.ExpiryMinutes}m   Entry: {FormatPrice(signal.LastClose)}   Grade: {signal.Grade}";
-
-        canvas.DrawText(title, 52, 70, titlePaint);
-        canvas.DrawText(subtitle, 52, 106, smallTextPaint);
-
-        var badgeText = signal.Direction == "LONG"
-            ? "UP / CALL"
-            : "DOWN / PUT";
-
-        var badgeTextWidth = badgeTextPaint.MeasureText(badgeText);
-
-        var badgeRect = new SKRect(
-            width - 230,
-            45,
-            width - 190 + badgeTextWidth,
-            85);
-
-        canvas.DrawRoundRect(
-            new SKRoundRect(badgeRect, 10, 10),
-            badgePaint);
+        var biasColor = signal.Bias == "SELL" ? sellColor : buyColor;
 
         canvas.DrawText(
-            badgeText,
-            badgeRect.Left + 14,
-            badgeRect.Top + 27,
-            badgeTextPaint);
+            $"Cassandra Analysis - {InstrumentName(signal.Symbol)} | Bias: {signal.Bias}",
+            width / 2f, 40, titlePaint);
+        canvas.DrawText(
+            "Giriş zonaları qrafikdə göstərilib",
+            width / 2f, 64, subtitlePaint);
 
-        var chartRect = new SKRect(52, 145, width - 190, height - 95);
-        var priceScaleRect = new SKRect(chartRect.Right, chartRect.Top, width - 52, chartRect.Bottom);
+        // ===== CHART sahəsi =====
+        var chartRect = new SKRect(70, 100, width - 110, height - 260);
 
-        DrawGrid(
-            canvas,
-            chartRect,
-            gridColor);
+        DrawGrid(canvas, chartRect, gridColor);
 
-        var minPrice = candles.Min(x => x.Low);
-        var maxPrice = candles.Max(x => x.High);
+        // Y oxu (sol) çərçivə xətti
+        using var axisPaint = new SKPaint
+        {
+            Color = axisColor,
+            StrokeWidth = 1.5f,
+            IsAntialias = true
+        };
+        canvas.DrawLine(chartRect.Left, chartRect.Top, chartRect.Left, chartRect.Bottom, axisPaint);
+        canvas.DrawLine(chartRect.Left, chartRect.Bottom, chartRect.Right, chartRect.Bottom, axisPaint);
 
-        minPrice = Math.Min(minPrice, signal.LastClose);
-        maxPrice = Math.Max(maxPrice, signal.LastClose);
+        // Qiymət aralığı
+        var allLevels = new List<decimal> { signal.DecisionPoint };
+        allLevels.AddRange(signal.SellZones);
+        allLevels.AddRange(signal.BuyZones);
+        if (signal.CounterZone > 0) allLevels.Add(signal.CounterZone);
 
-        var padding = (maxPrice - minPrice) * 0.12m;
-
-        if (padding <= 0)
-            padding = Math.Max(signal.LastClose * 0.001m, 0.0001m);
-
+        var minPrice = Math.Min(candles.Min(x => x.Low), allLevels.Min());
+        var maxPrice = Math.Max(candles.Max(x => x.High), allLevels.Max());
+        var padding = (maxPrice - minPrice) * 0.08m;
+        if (padding <= 0) padding = 1m;
         minPrice -= padding;
         maxPrice += padding;
 
-        DrawCandles(
-            canvas,
-            candles,
-            chartRect,
-            minPrice,
-            maxPrice,
-            bullColor,
-            bearColor);
+        // Y oxu qiymət etiketləri (sol)
+        DrawPriceAxis(canvas, chartRect, minPrice, maxPrice, mutedText);
 
-        DrawPriceLine(
-            canvas,
-            chartRect,
-            priceScaleRect,
-            minPrice,
-            maxPrice,
-            signal.LastClose,
-            "ENTRY",
-            entryColor);
+        DrawCandles(canvas, candles, chartRect, minPrice, maxPrice, bullColor, bearColor);
 
-        DrawCurrentPriceLabel(
-            canvas,
-            chartRect,
-            priceScaleRect,
-            candles.Last().Close,
-            minPrice,
-            maxPrice);
+        // ===== BIAS OXU (yuxarıda, nazik) =====
+        DrawBiasArrow(canvas, chartRect, signal, minPrice, maxPrice, sellColor, buyColor);
 
-        DrawExpiryMarker(
-            canvas,
-            chartRect,
-            signal.ExpiryMinutes,
-            expiryColor);
+        // ===== ZONALAR — PİYADA DÖYÜŞÜ məntiqi ilə =====
+        // Bias istiqamətindəki zonalar (piyada). Amma qiymət bir zonanı QIRIBSA
+        // (BUY-da zona qiymətdən yuxarı qalıbsa = qırılıb → artıq SELL zona = qırmızı).
+        var activeZones = signal.Bias == "SELL" ? signal.SellZones : signal.BuyZones;
 
-        using var rulePaint = new SKPaint
+        foreach (var zone in activeZones)
         {
-            Color = textColor,
-            IsAntialias = true,
-            TextSize = 21,
-            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
-        };
+            bool broken;
+            string label;
+            SKColor color;
 
-        var ruleText = signal.Direction == "LONG"
-            ? $"Expiry sonunda qiymet ENTRY-den yuxarida baglanmalidir."
-            : $"Expiry sonunda qiymet ENTRY-den asagida baglanmalidir.";
+            if (signal.Bias == "BUY")
+            {
+                // BUY zona qiymətin ALTINDA olmalıdır. Yuxarıda qalıbsa qırılıb → SELL (qırmızı, nazik).
+                broken = zone > signal.LastPrice;
+                color = broken ? sellColor : buyColor;
+                label = broken ? "Sell zone" : "Buy zone";
+            }
+            else
+            {
+                // SELL zona qiymətin ÜSTÜNDƏ olmalıdır. Aşağıda qalıbsa qırılıb → BUY (yaşıl, nazik).
+                broken = zone < signal.LastPrice;
+                color = broken ? buyColor : sellColor;
+                label = broken ? "Buy zone" : "Sell zone";
+            }
 
-        canvas.DrawText(
-            ruleText,
-            52,
-            height - 55,
-            rulePaint);
+            DrawZoneLine(canvas, chartRect, minPrice, maxPrice, zone, label, color, signal.Bias);
+        }
+
+        // ===== BIASA TƏRS ZONA — qalın QIRMIZI xətt (varsa) =====
+        // BUY bias-da yuxarıdakı güclü resistance, SELL bias-da aşağıdakı güclü support.
+        if (signal.CounterZone > 0)
+        {
+            var counterColor = signal.Bias == "BUY" ? sellColor : buyColor;
+            var counterLabel = signal.Bias == "BUY" ? "Sell zone (Biasa tərs)" : "Buy zone (Biasa tərs)";
+            DrawCounterLine(canvas, chartRect, minPrice, maxPrice, signal.CounterZone, counterLabel, counterColor);
+        }
+
+        // Qərar nöqtəsi (şah) — GÜCLÜ qalın xətt
+        DrawDecisionLine(canvas, chartRect, minPrice, maxPrice, signal.DecisionPoint, decisionColor);
+
+        // Son qiymət etiketi (sağ yuxarı)
+        DrawLastPriceLabel(canvas, chartRect, signal.LastPrice, signal.Bias, minPrice, maxPrice, biasColor);
+
+        // ===== ALTDA MƏTN =====
+        DrawNote(canvas, signal, 70, height - 230, textColor, mutedText, biasColor);
 
         using var footerPaint = new SKPaint
         {
-            Color = mutedTextColor,
+            Color = SKColor.Parse("#9CA3AF"),
             IsAntialias = true,
-            TextSize = 17,
+            TextSize = 12,
             Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
         };
-
         canvas.DrawText(
-            $"M1 chart | Created UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}",
-            52,
-            height - 28,
-            footerPaint);
+            $"{TfLabel(signal.Timeframe)} chart | {signal.Symbol} | Created UTC: {DateTime.UtcNow:yyyy-MM-dd HH:mm:ss}",
+            70, height - 24, footerPaint);
 
         using var image = SKImage.FromBitmap(bitmap);
         using var data = image.Encode(SKEncodedImageFormat.Png, 95);
-
         using var stream = File.OpenWrite(filePath);
         data.SaveTo(stream);
 
         return filePath;
     }
 
+    private void DrawNote(
+        SKCanvas canvas,
+        SmartTradeSignal signal,
+        float x,
+        float y,
+        SKColor textColor,
+        SKColor mutedColor,
+        SKColor biasColor)
+    {
+        using var headerPaint = new SKPaint
+        {
+            Color = biasColor,
+            IsAntialias = true,
+            TextSize = 17,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+        };
+        using var linePaint = new SKPaint
+        {
+            Color = textColor,
+            IsAntialias = true,
+            TextSize = 14,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
+        };
+
+        var lineHeight = 20f;
+        var currentY = y;
+
+        canvas.DrawText($"Bias: {signal.Bias}", x, currentY, headerPaint);
+        currentY += lineHeight + 2;
+
+        var zones = signal.Bias == "SELL" ? signal.SellZones : signal.BuyZones;
+        var zoneLabel = signal.Bias == "SELL" ? "SELL zonaları" : "BUY zonaları";
+
+        canvas.DrawText($"{zoneLabel}:", x, currentY, linePaint);
+        currentY += lineHeight;
+
+        foreach (var z in zones.Take(3))
+        {
+            canvas.DrawText($"   • {FormatPrice(z)}", x, currentY, linePaint);
+            currentY += lineHeight;
+        }
+
+        canvas.DrawText($"Qərar Nöqtəsi (şah): {FormatPrice(signal.DecisionPoint)}", x, currentY, linePaint);
+        currentY += lineHeight;
+
+        // Biasa tərs zona — varsa, qırmızı/yaşıl rənglə.
+        if (signal.CounterZone > 0)
+        {
+            var counterLabel = signal.Bias == "BUY" ? "Sell zone (Biasa tərs)" : "Buy zone (Biasa tərs)";
+            using var counterPaint = new SKPaint
+            {
+                Color = signal.Bias == "BUY" ? SKColor.Parse("#DC2626") : SKColor.Parse("#059669"),
+                IsAntialias = true,
+                TextSize = 14,
+                Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+            };
+            canvas.DrawText($"{counterLabel}: {FormatPrice(signal.CounterZone)}", x, currentY, counterPaint);
+            currentY += lineHeight;
+        }
+
+        canvas.DrawText($"Ən yaxın zona: {FormatPrice(signal.NearestZone)}", x, currentY, linePaint);
+    }
+
     private string GetOutputDirectory()
     {
         var wwwroot = _environment.WebRootPath;
-
         if (string.IsNullOrWhiteSpace(wwwroot))
-        {
-            wwwroot = Path.Combine(
-                _environment.ContentRootPath,
-                "wwwroot");
-        }
-
-        return Path.Combine(
-            wwwroot,
-            "binary-charts");
+            wwwroot = Path.Combine(_environment.ContentRootPath, "wwwroot");
+        return Path.Combine(wwwroot, "forex-charts");
     }
 
-    private static List<Candle> MapCandles(
-        TwelveDataResponse? response,
-        string symbol)
+    private static void DrawGrid(SKCanvas canvas, SKRect chartRect, SKColor gridColor)
     {
-        if (response?.Values == null)
-            return new List<Candle>();
-
-        var formats = new[]
+        using var gridPaint = new SKPaint { Color = gridColor, StrokeWidth = 1, IsAntialias = true };
+        for (var i = 1; i < 6; i++)
         {
-            "yyyy-MM-dd HH:mm:ss",
-            "yyyy-MM-dd HH:mm",
-            "yyyy-MM-dd"
-        };
-
-        var candles = new List<Candle>();
-
-        foreach (var item in response.Values)
-        {
-            if (!DateTime.TryParseExact(
-                    item.DateTime,
-                    formats,
-                    CultureInfo.InvariantCulture,
-                    DateTimeStyles.None,
-                    out var time))
-            {
-                continue;
-            }
-
-            candles.Add(new Candle
-            {
-                Symbol = symbol,
-                Time = time,
-                Open = item.Open,
-                High = item.High,
-                Low = item.Low,
-                Close = item.Close
-            });
+            var yy = chartRect.Top + chartRect.Height / 6 * i;
+            canvas.DrawLine(chartRect.Left, yy, chartRect.Right, yy, gridPaint);
         }
-
-        return candles
-            .OrderBy(x => x.Time)
-            .ToList();
+        for (var i = 1; i < 10; i++)
+        {
+            var xx = chartRect.Left + chartRect.Width / 10 * i;
+            canvas.DrawLine(xx, chartRect.Top, xx, chartRect.Bottom, gridPaint);
+        }
     }
 
-    private static void DrawGrid(
-        SKCanvas canvas,
-        SKRect chartRect,
-        SKColor gridColor)
+    private void DrawPriceAxis(
+        SKCanvas canvas, SKRect chartRect, decimal minPrice, decimal maxPrice, SKColor color)
     {
-        using var gridPaint = new SKPaint
+        using var txtPaint = new SKPaint
         {
-            Color = gridColor,
-            StrokeWidth = 1,
-            IsAntialias = true
+            Color = color,
+            IsAntialias = true,
+            TextSize = 12,
+            TextAlign = SKTextAlign.Right,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
         };
-
         for (var i = 0; i <= 6; i++)
         {
-            var y = chartRect.Top + chartRect.Height / 6 * i;
-            canvas.DrawLine(chartRect.Left, y, chartRect.Right, y, gridPaint);
-        }
-
-        for (var i = 0; i <= 10; i++)
-        {
-            var x = chartRect.Left + chartRect.Width / 10 * i;
-            canvas.DrawLine(x, chartRect.Top, x, chartRect.Bottom, gridPaint);
+            var price = maxPrice - (maxPrice - minPrice) / 6 * i;
+            var yy = chartRect.Top + chartRect.Height / 6 * i;
+            canvas.DrawText(FormatPrice(price), chartRect.Left - 8, yy + 4, txtPaint);
         }
     }
 
     private static void DrawCandles(
-        SKCanvas canvas,
-        List<Candle> candles,
-        SKRect chartRect,
-        decimal minPrice,
-        decimal maxPrice,
-        SKColor bullColor,
-        SKColor bearColor)
+        SKCanvas canvas, List<Candle> candles, SKRect chartRect,
+        decimal minPrice, decimal maxPrice, SKColor bullColor, SKColor bearColor)
     {
         var candleCount = candles.Count;
         var slotWidth = chartRect.Width / candleCount;
-        var candleBodyWidth = Math.Max(4, slotWidth * 0.58f);
+        var candleBodyWidth = Math.Max(2, slotWidth * 0.6f);
 
-        using var wickPaint = new SKPaint
-        {
-            StrokeWidth = 2,
-            IsAntialias = true
-        };
-
-        using var bodyPaint = new SKPaint
-        {
-            IsAntialias = true
-        };
+        using var wickPaint = new SKPaint { StrokeWidth = 1, IsAntialias = true };
+        using var bodyPaint = new SKPaint { IsAntialias = true };
 
         for (var i = 0; i < candleCount; i++)
         {
             var candle = candles[i];
-
             var x = chartRect.Left + slotWidth * i + slotWidth / 2;
 
             var openY = PriceToY(candle.Open, chartRect, minPrice, maxPrice);
@@ -401,7 +355,6 @@ public class BinaryChartImageService : IBinaryChartImageService
 
             var isBull = candle.Close >= candle.Open;
             var color = isBull ? bullColor : bearColor;
-
             wickPaint.Color = color;
             bodyPaint.Color = color;
 
@@ -409,178 +362,261 @@ public class BinaryChartImageService : IBinaryChartImageService
 
             var bodyTop = Math.Min(openY, closeY);
             var bodyBottom = Math.Max(openY, closeY);
+            if (Math.Abs(bodyBottom - bodyTop) < 1) bodyBottom = bodyTop + 1;
 
-            if (Math.Abs(bodyBottom - bodyTop) < 2)
-            {
-                bodyBottom = bodyTop + 2;
-            }
-
-            var bodyRect = new SKRect(
-                x - candleBodyWidth / 2,
-                bodyTop,
-                x + candleBodyWidth / 2,
-                bodyBottom);
-
-            canvas.DrawRect(bodyRect, bodyPaint);
+            canvas.DrawRect(
+                new SKRect(x - candleBodyWidth / 2, bodyTop, x + candleBodyWidth / 2, bodyBottom),
+                bodyPaint);
         }
     }
 
-    private static void DrawPriceLine(
-        SKCanvas canvas,
-        SKRect chartRect,
-        SKRect priceScaleRect,
-        decimal minPrice,
-        decimal maxPrice,
-        decimal price,
-        string label,
-        SKColor color)
+    private void DrawZoneLine(
+        SKCanvas canvas, SKRect chartRect, decimal minPrice, decimal maxPrice,
+        decimal price, string label, SKColor color, string bias)
     {
         var y = PriceToY(price, chartRect, minPrice, maxPrice);
+        if (y < chartRect.Top || y > chartRect.Bottom) return;
 
+        // Nazik üfüqi xətt
         using var linePaint = new SKPaint
         {
             Color = color,
-            StrokeWidth = 2,
-            IsAntialias = true,
-            PathEffect = SKPathEffect.CreateDash(new[] { 8f, 6f }, 0)
+            StrokeWidth = 1.5f,
+            IsAntialias = true
         };
-
         canvas.DrawLine(chartRect.Left, y, chartRect.Right, y, linePaint);
 
-        using var labelBackgroundPaint = new SKPaint
+        // Sağda kiçik etiket
+        using var bgPaint = new SKPaint { Color = color, IsAntialias = true };
+        using var txtPaint = new SKPaint
+        {
+            Color = SKColors.White,
+            IsAntialias = true,
+            TextSize = 12,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+        };
+
+        var text = FormatPrice(price);
+        var tw = txtPaint.MeasureText(text);
+        var rect = new SKRect(chartRect.Right + 4, y - 10, chartRect.Right + 14 + tw, y + 10);
+        canvas.DrawRect(rect, bgPaint);
+        canvas.DrawText(text, rect.Left + 5, y + 4, txtPaint);
+
+        // Zona adı (xəttin üstündə, sol)
+        using var labelPaint = new SKPaint
         {
             Color = color,
-            IsAntialias = true
-        };
-
-        using var labelTextPaint = new SKPaint
-        {
-            Color = SKColors.White,
             IsAntialias = true,
-            TextSize = 17,
-            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+            TextSize = 11,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
         };
-
-        var text = $"{label} {FormatPrice(price)}";
-        var textWidth = labelTextPaint.MeasureText(text);
-
-        var rect = new SKRect(
-            priceScaleRect.Left + 8,
-            y - 16,
-            priceScaleRect.Left + 22 + textWidth,
-            y + 16);
-
-        canvas.DrawRoundRect(
-            new SKRoundRect(rect, 7, 7),
-            labelBackgroundPaint);
-
-        canvas.DrawText(
-            text,
-            rect.Left + 7,
-            y + 6,
-            labelTextPaint);
+        canvas.DrawText(label, chartRect.Right - 120, y - 4, labelPaint);
     }
 
-    private static void DrawCurrentPriceLabel(
-        SKCanvas canvas,
-        SKRect chartRect,
-        SKRect priceScaleRect,
-        decimal price,
-        decimal minPrice,
-        decimal maxPrice)
+    private void DrawCounterLine(
+        SKCanvas canvas, SKRect chartRect, decimal minPrice, decimal maxPrice,
+        decimal price, string label, SKColor color)
     {
         var y = PriceToY(price, chartRect, minPrice, maxPrice);
+        if (y < chartRect.Top || y > chartRect.Bottom) return;
 
-        using var paint = new SKPaint
-        {
-            Color = SKColor.Parse("#64748B"),
-            IsAntialias = true
-        };
-
-        using var textPaint = new SKPaint
-        {
-            Color = SKColors.White,
-            IsAntialias = true,
-            TextSize = 16,
-            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
-        };
-
-        var text = $"LAST {FormatPrice(price)}";
-        var textWidth = textPaint.MeasureText(text);
-
-        var rect = new SKRect(
-            priceScaleRect.Left + 8,
-            y - 15,
-            priceScaleRect.Left + 22 + textWidth,
-            y + 15);
-
-        canvas.DrawRoundRect(
-            new SKRoundRect(rect, 7, 7),
-            paint);
-
-        canvas.DrawText(
-            text,
-            rect.Left + 7,
-            y + 6,
-            textPaint);
-    }
-
-    private static void DrawExpiryMarker(
-        SKCanvas canvas,
-        SKRect chartRect,
-        int expiryMinutes,
-        SKColor color)
-    {
+        // Biasa tərs zona — qalın xətt (güclü tepki gözlənilir).
         using var linePaint = new SKPaint
         {
             Color = color,
-            StrokeWidth = 2,
-            IsAntialias = true,
-            PathEffect = SKPathEffect.CreateDash(new[] { 10f, 8f }, 0)
+            StrokeWidth = 3.5f,
+            IsAntialias = true
         };
+        canvas.DrawLine(chartRect.Left, y, chartRect.Right, y, linePaint);
 
-        using var textPaint = new SKPaint
+        // Sağda qalın etiket.
+        using var bgPaint = new SKPaint { Color = color, IsAntialias = true };
+        using var txtPaint = new SKPaint
+        {
+            Color = SKColors.White,
+            IsAntialias = true,
+            TextSize = 13,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+        };
+        var text = FormatPrice(price);
+        var tw = txtPaint.MeasureText(text);
+        var rect = new SKRect(chartRect.Right + 4, y - 12, chartRect.Right + 14 + tw, y + 12);
+        canvas.DrawRect(rect, bgPaint);
+        canvas.DrawText(text, rect.Left + 5, y + 4, txtPaint);
+
+        // Etiket adı xəttin üstündə (sol).
+        using var labelPaint = new SKPaint
         {
             Color = color,
             IsAntialias = true,
-            TextSize = 18,
+            TextSize = 11,
             Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
         };
-
-        var x = chartRect.Right - 28;
-
-        canvas.DrawLine(
-            x,
-            chartRect.Top,
-            x,
-            chartRect.Bottom,
-            linePaint);
-
-        canvas.DrawText(
-            $"EXPIRY {expiryMinutes}m",
-            chartRect.Right - 145,
-            chartRect.Top + 24,
-            textPaint);
+        canvas.DrawText(label, chartRect.Right - 175, y - 5, labelPaint);
     }
 
-    private static float PriceToY(
-        decimal price,
-        SKRect chartRect,
-        decimal minPrice,
-        decimal maxPrice)
+    private void DrawDecisionLine(
+        SKCanvas canvas, SKRect chartRect, decimal minPrice, decimal maxPrice,
+        decimal price, SKColor color)
+    {
+        var y = PriceToY(price, chartRect, minPrice, maxPrice);
+        if (y < chartRect.Top || y > chartRect.Bottom) return;
+
+        // ŞAH — güclü qalın xətt.
+        using var linePaint = new SKPaint
+        {
+            Color = color,
+            StrokeWidth = 3.5f,
+            IsAntialias = true
+        };
+        canvas.DrawLine(chartRect.Left, y, chartRect.Right, y, linePaint);
+
+        // Sağda qalın etiket.
+        using var bgPaint = new SKPaint { Color = color, IsAntialias = true };
+        using var txtPaint = new SKPaint
+        {
+            Color = SKColors.White,
+            IsAntialias = true,
+            TextSize = 13,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+        };
+        var text = FormatPrice(price);
+        var tw = txtPaint.MeasureText(text);
+        var rect = new SKRect(chartRect.Right + 4, y - 12, chartRect.Right + 14 + tw, y + 12);
+        canvas.DrawRect(rect, bgPaint);
+        canvas.DrawText(text, rect.Left + 5, y + 4, txtPaint);
+
+        // "ŞAH" adı xəttin üstündə.
+        using var labelPaint = new SKPaint
+        {
+            Color = color,
+            IsAntialias = true,
+            TextSize = 12,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+        };
+        canvas.DrawText("ŞAH (Qərar Nöqtəsi)", chartRect.Right - 165, y - 5, labelPaint);
+    }
+
+    private static void DrawBiasArrow(
+        SKCanvas canvas, SKRect chartRect, SmartTradeSignal signal,
+        decimal minPrice, decimal maxPrice, SKColor sellColor, SKColor buyColor)
+    {
+        // Bias oxu: BUY → aşağıdan yuxarı yaşıl ox (zonalardan qalxır);
+        //           SELL → yuxarıdan aşağı qırmızı ox.
+        var color = signal.Bias == "SELL" ? sellColor : buyColor;
+        using var arrowPaint = new SKPaint
+        {
+            Color = color,
+            StrokeWidth = 2.5f,
+            IsAntialias = true,
+            Style = SKPaintStyle.Stroke
+        };
+
+        var x = chartRect.Left + chartRect.Width * 0.72f;
+
+        if (signal.Bias == "SELL")
+        {
+            var topY = chartRect.Top + 20;
+            var botY = chartRect.Top + 90;
+            canvas.DrawLine(x, topY, x, botY, arrowPaint);
+            canvas.DrawLine(x, botY, x - 8, botY - 12, arrowPaint);
+            canvas.DrawLine(x, botY, x + 8, botY - 12, arrowPaint);
+        }
+        else
+        {
+            // Yaşıl oxlar zonalardan yuxarı (giriş istiqaməti) — ən yaxın zonadan qalxan
+            var nearY = PriceToY(signal.NearestZone, chartRect, minPrice, maxPrice);
+            var topY = nearY - 60;
+            canvas.DrawLine(x, nearY, x, topY, arrowPaint);
+            canvas.DrawLine(x, topY, x - 8, topY + 12, arrowPaint);
+            canvas.DrawLine(x, topY, x + 8, topY + 12, arrowPaint);
+        }
+    }
+
+    private void DrawLastPriceLabel(
+        SKCanvas canvas, SKRect chartRect, decimal price, string bias,
+        decimal minPrice, decimal maxPrice, SKColor biasColor)
+    {
+        using var txtPaint = new SKPaint
+        {
+            Color = SKColor.Parse("#374151"),
+            IsAntialias = true,
+            TextSize = 12,
+            TextAlign = SKTextAlign.Right,
+            Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
+        };
+        canvas.DrawText($"Son qiymət: {FormatPrice(price)}", chartRect.Right, chartRect.Top - 6, txtPaint);
+        canvas.DrawText($"Bias: {bias}", chartRect.Right, chartRect.Top + 10, txtPaint);
+    }
+
+    private static float PriceToY(decimal price, SKRect chartRect, decimal minPrice, decimal maxPrice)
     {
         var range = maxPrice - minPrice;
-
-        if (range <= 0)
-            return chartRect.MidY;
-
+        if (range <= 0) return chartRect.MidY;
         var percentage = (price - minPrice) / range;
-
         return chartRect.Bottom - (float)percentage * chartRect.Height;
     }
 
-    private static string FormatPrice(decimal price)
+    private static List<Candle> MapCandles(TwelveDataResponse? response, string symbol)
     {
-        return price.ToString("0.#####");
+        if (response?.Values == null)
+            return new List<Candle>();
+
+        var formats = new[] { "yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd" };
+        var candles = new List<Candle>();
+
+        foreach (var item in response.Values)
+        {
+            if (!DateTime.TryParseExact(
+                    item.DateTime, formats,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var time))
+            {
+                continue;
+            }
+
+            candles.Add(new Candle
+            {
+                Time = time,
+                Symbol = symbol,
+                Open = (decimal)item.Open,
+                High = (decimal)item.High,
+                Low = (decimal)item.Low,
+                Close = (decimal)item.Close
+            });
+        }
+
+        return candles.OrderBy(x => x.Time).ToList();
+    }
+
+    private static string TfLabel(string tf) => tf switch
+    {
+        "1min" => "M1",
+        "5min" => "M5",
+        _ => "M15"
+    };
+
+    private static string InstrumentName(string symbol)
+    {
+        var s = symbol.ToUpperInvariant();
+        if (s.Contains("XAU")) return "GOLD";
+        return symbol;
+    }
+
+    private static int GetDigits(string symbol)
+    {
+        var s = symbol.ToUpperInvariant();
+        if (s.Contains("JPY")) return 3;
+        if (s.Contains("XAU")) return 2;
+        if (s.Contains("BTC") || s.Contains("ETH")) return 2;
+        if (s.Contains("USOIL")) return 2;
+        return 5;
+    }
+
+    private string FormatPrice(decimal price)
+    {
+        var digits = GetDigits(_currentSymbol);
+        var fmt = "0." + new string('0', digits);
+        return price.ToString(fmt, System.Globalization.CultureInfo.InvariantCulture);
     }
 }

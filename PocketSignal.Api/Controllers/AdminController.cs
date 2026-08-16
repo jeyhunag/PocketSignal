@@ -654,7 +654,7 @@ public class AdminController : ControllerBase
             </div>
 
             <div class="symbols">
-                {{binaryRadios}}
+                {{BuildCheckboxes("binaryActiveSymbols", settings.BinarySymbols, settings.BinaryActiveSymbols)}}
             </div>
         </div>
 
@@ -919,9 +919,12 @@ async function saveSettings() {
     const binaryEnabled = binaryEnabledElement.checked;
     const forexEnabled = forexEnabledElement.checked;
 
-    const binaryActiveSymbolInput = document.querySelector("input[name='binaryActiveSymbol']:checked");
-    const binaryActiveSymbol = binaryActiveSymbolInput
-        ? binaryActiveSymbolInput.value
+    const binaryActiveSymbols = Array
+        .from(document.querySelectorAll("input[name='binaryActiveSymbols']:checked"))
+        .map(x => x.value);
+
+    const binaryActiveSymbol = binaryActiveSymbols.length > 0
+        ? binaryActiveSymbols[0]
         : "";
 
     const forexActiveSymbols = Array
@@ -961,6 +964,7 @@ async function saveSettings() {
         body: JSON.stringify({
             binaryEnabled,
             binaryActiveSymbol,
+            binaryActiveSymbols,
             binaryTimeframe,
             forexEnabled,
             forexActiveSymbol,

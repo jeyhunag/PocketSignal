@@ -59,7 +59,18 @@ public class CassandraBinarySignalService : ISmartSignalService
                 : "Qərar nöqtəsi (şah) yuxarı qırılsa bias dəyişir.",
             Reasons = BuildReasons(fx),
             CreatedAtUtc = DateTime.UtcNow,
-            SideAnalyses = new List<Models.Common.SideAnalysis>()
+            SideAnalyses = new List<Models.Common.SideAnalysis>(),
+
+            // Cassandra sahələri (şəkil üçün).
+            Bias = fx.Bias,
+            SellZones = fx.SellZones,
+            BuyZones = fx.BuyZones,
+            DecisionPoint = fx.DecisionPoint,
+            CounterZone = fx.CounterZone,
+            NearestZone = fx.NearestZone,
+            LastPrice = fx.LastPrice,
+            BiasNote = fx.BiasNote,
+            Timeframe = fx.Timeframe
         };
     }
 

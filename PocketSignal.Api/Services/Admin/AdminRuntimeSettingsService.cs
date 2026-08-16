@@ -112,6 +112,11 @@ public class AdminRuntimeSettingsService : IAdminRuntimeSettingsService
                 settings.BinaryActiveSymbol = allowedBinarySymbol;
             }
 
+            // Binary çoxlu seçim (forex kimi).
+            settings.BinaryActiveSymbols = NormalizeActiveSymbols(
+                request.BinaryActiveSymbols,
+                settings.BinarySymbols);
+
             settings.ForexActiveSymbols = NormalizeActiveSymbols(
                 request.ForexActiveSymbols,
                 settings.ForexSymbols);

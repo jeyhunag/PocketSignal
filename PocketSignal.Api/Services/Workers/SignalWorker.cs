@@ -64,12 +64,23 @@ public class SignalWorker : BackgroundService
             return;
         }
 
-        var symbol = settings.BinaryActiveSymbol;
-
-        if (string.IsNullOrWhiteSpace(symbol))
+        // Çoxlu binary cütü (forex kimi). Seçilmiş cütlərin hamısı analiz olunur.
+        var symbols = new List<string>();
+        if (settings.BinaryActiveSymbols != null)
         {
-            symbol = "EUR/USD";
+            foreach (var s in settings.BinaryActiveSymbols)
+            {
+                if (!string.IsNullOrWhiteSpace(s) && !symbols.Contains(s))
+                    symbols.Add(s);
+            }
         }
+
+        // Heç biri seçilməyibsə köhnə tək symbol-a düş.
+        if (symbols.Count == 0 && !string.IsNullOrWhiteSpace(settings.BinaryActiveSymbol))
+            symbols.Add(settings.BinaryActiveSymbol);
+
+        if (symbols.Count == 0)
+            symbols.Add("EUR/USD");
 
         using var scope = _scopeFactory.CreateScope();
 
@@ -79,57 +90,50 @@ public class SignalWorker : BackgroundService
         var notificationService =
             scope.ServiceProvider.GetRequiredService<ISignalNotificationService>();
 
-        var signalResultTracker =
-            scope.ServiceProvider.GetRequiredService<ISignalResultTracker>();
-
         var dailyStatsService =
             scope.ServiceProvider.GetRequiredService<IDailyStatsService>();
 
-        await signalResultTracker.EvaluateDueSignalsAsync(cancellationToken);
+        // Cassandra Entry/Exit vermir — trade result tracker (WIN/LOSS) söndürülüb.
 
         var binaryTimeframe = string.IsNullOrWhiteSpace(settings.BinaryTimeframe)
             ? "15min"
             : settings.BinaryTimeframe;
 
-        var signal = await smartSignalService.AnalyzeAsync(
-            symbol,
-            binaryTimeframe,
-            cancellationToken);
-
-        var result = await notificationService.NotifyIfValidSignalAsync(
-            signal,
-            cancellationToken);
-
-        if (result.Sent)
+        foreach (var symbol in symbols)
         {
-            var registeredTrade = signalResultTracker.RegisterSignal(signal);
+            if (cancellationToken.IsCancellationRequested)
+                break;
 
-            if (registeredTrade != null)
+            try
             {
+                var signal = await smartSignalService.AnalyzeAsync(
+                    symbol,
+                    binaryTimeframe,
+                    cancellationToken);
+
+                var result = await notificationService.NotifyIfValidSignalAsync(
+                    signal,
+                    cancellationToken);
+
+                dailyStatsService.RecordCheck(
+                    signal,
+                    result.Sent,
+                    result.Message);
+
                 _logger.LogInformation(
-                    "Signal registered. Id: {Id} | {Symbol} {Direction} {Expiry}m | Entry: {EntryPrice} | Due: {DueAtUtc}",
-                    registeredTrade.Id,
-                    registeredTrade.Symbol,
-                    registeredTrade.Direction,
-                    registeredTrade.ExpiryMinutes,
-                    registeredTrade.EntryPrice,
-                    registeredTrade.DueAtUtc);
+                    "BINARY | Symbol: {Symbol} | Direction: {Direction} | Sent: {Sent} | Message: {Message}",
+                    signal.Symbol,
+                    signal.Direction,
+                    result.Sent,
+                    result.Message);
             }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "BINARY analiz xətası: {Symbol}", symbol);
+            }
+
+            // API limitini aşmamaq üçün cütlər arası kiçik fasilə.
+            await Task.Delay(700, cancellationToken);
         }
-
-        await signalResultTracker.EvaluateDueSignalsAsync(cancellationToken);
-
-        dailyStatsService.RecordCheck(
-            signal,
-            result.Sent,
-            result.Message);
-
-        _logger.LogInformation(
-            "BINARY | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
-            signal.Symbol,
-            signal.Direction,
-            signal.Confidence,
-            result.Sent,
-            result.Message);
     }
 }
