@@ -119,7 +119,7 @@ public class ForexChartImageService : IForexChartImageService
         var biasColor = signal.Bias == "SELL" ? sellColor : buyColor;
 
         canvas.DrawText(
-            $"Cassandra Analysis - {InstrumentName(signal.Symbol)} | Bias: {signal.Bias}",
+            $"{signal.Symbol} | Bias: {signal.Bias}",
             width / 2f, 40, titlePaint);
         canvas.DrawText(
             "Giriş zonaları qrafikdə göstərilib",
@@ -187,7 +187,17 @@ public class ForexChartImageService : IForexChartImageService
                 label = broken ? "Buy zone" : "Sell zone";
             }
 
-            DrawZoneLine(canvas, chartRect, minPrice, maxPrice, zone, label, color, signal.Bias);
+            // Zona gücü (touch count) — güclü zona qalın + güc etiketi.
+            var key = zone.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var touches = signal.ZoneStrengths != null && signal.ZoneStrengths.ContainsKey(key)
+                ? signal.ZoneStrengths[key]
+                : 1;
+
+            // Güc dərəcəsi: 3+ toxunuş = GÜCLÜ, 2 = orta, 1 = zəif.
+            var strengthText = touches >= 3 ? "GÜCLÜ" : touches == 2 ? "orta" : "zəif";
+            var strengthLabel = $"{label} ({strengthText})";
+
+            DrawZoneLine(canvas, chartRect, minPrice, maxPrice, zone, strengthLabel, color, signal.Bias, touches);
         }
 
         // ===== BIASA TƏRS ZONA — qalın QIRMIZI xətt (varsa) =====
@@ -263,9 +273,13 @@ public class ForexChartImageService : IForexChartImageService
         canvas.DrawText($"{zoneLabel}:", x, currentY, linePaint);
         currentY += lineHeight;
 
-        foreach (var z in zones.Take(3))
+        foreach (var z in zones.Take(5))
         {
-            canvas.DrawText($"   • {FormatPrice(z)}", x, currentY, linePaint);
+            var key = z.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var touches = signal.ZoneStrengths != null && signal.ZoneStrengths.ContainsKey(key)
+                ? signal.ZoneStrengths[key] : 1;
+            var st = touches >= 3 ? "GÜCLÜ" : touches == 2 ? "orta" : "zəif";
+            canvas.DrawText($"   • {FormatPrice(z)} ({st})", x, currentY, linePaint);
             currentY += lineHeight;
         }
 
@@ -372,16 +386,19 @@ public class ForexChartImageService : IForexChartImageService
 
     private void DrawZoneLine(
         SKCanvas canvas, SKRect chartRect, decimal minPrice, decimal maxPrice,
-        decimal price, string label, SKColor color, string bias)
+        decimal price, string label, SKColor color, string bias, int touches = 1)
     {
         var y = PriceToY(price, chartRect, minPrice, maxPrice);
         if (y < chartRect.Top || y > chartRect.Bottom) return;
+
+        // Güclü zona (çox toxunulan) qalın, zəif zona nazik.
+        var strokeWidth = touches >= 3 ? 3.5f : touches == 2 ? 2.2f : 1.2f;
 
         // Nazik üfüqi xətt
         using var linePaint = new SKPaint
         {
             Color = color,
-            StrokeWidth = 1.5f,
+            StrokeWidth = strokeWidth,
             IsAntialias = true
         };
         canvas.DrawLine(chartRect.Left, y, chartRect.Right, y, linePaint);

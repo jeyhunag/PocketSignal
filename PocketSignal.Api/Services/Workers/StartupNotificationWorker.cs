@@ -32,12 +32,20 @@ public class StartupNotificationWorker : BackgroundService
 
             var settings = await adminSettingsService.GetAsync(stoppingToken);
 
+            var binarySymbolsText = settings.BinaryActiveSymbols.Count > 0
+                ? string.Join(", ", settings.BinaryActiveSymbols)
+                : settings.BinaryActiveSymbol;
+
+            var forexSymbolsText = settings.ForexActiveSymbols.Count > 0
+                ? string.Join(", ", settings.ForexActiveSymbols)
+                : settings.ForexActiveSymbol;
+
             var binaryStatus = settings.BinaryEnabled
-                ? $"{settings.BinaryActiveSymbol} aktivdir"
+                ? $"{binarySymbolsText} aktivdir"
                 : "deaktivdir";
 
             var forexStatus = settings.ForexEnabled
-                ? $"{settings.ForexActiveSymbol} aktivdir"
+                ? $"{forexSymbolsText} aktivdir"
                 : "deaktivdir";
 
             var message =

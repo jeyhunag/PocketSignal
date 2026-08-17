@@ -106,6 +106,15 @@ public class CoreForexSignalService : IForexSignalService
         var swingHighs = swings.Where(x => x.Kind == "HIGH").OrderBy(x => x.Index).ToList();
         var swingLows = swings.Where(x => x.Kind == "LOW").OrderBy(x => x.Index).ToList();
 
+        // Fallback: əsas pəncərə ilə az swing tapılsa (məs. az hərəkətli/təkrarlı data),
+        // daha kiçik pəncərə (2,2) ilə yenidən cəhd et.
+        if (swingHighs.Count < 3 || swingLows.Count < 3)
+        {
+            var swings2 = FindSwings(candles, 2, 2);
+            swingHighs = swings2.Where(x => x.Kind == "HIGH").OrderBy(x => x.Index).ToList();
+            swingLows = swings2.Where(x => x.Kind == "LOW").OrderBy(x => x.Index).ToList();
+        }
+
         if (swingHighs.Count < 3 || swingLows.Count < 3)
             return Wait(symbol, "Cassandra: kifayət qədər swing nöqtəsi tapılmadı.");
 
@@ -238,7 +247,86 @@ public class CoreForexSignalService : IForexSignalService
             BuyZones = buyZones
         }, TimeSpan.FromHours(24));
 
-        var note = BuildBiasNote(symbol, bias, sellZones, buyZones, decisionPoint, nearestZone, counterZone);
+        // Zonaları yuvarlaqlaşdır ki, güc açarı hər yerdə (şəkil xətti, mətn) uyğun gəlsin.
+        sellZones = sellZones.Select(z => RoundPrice(symbol, z)).ToList();
+        buyZones = buyZones.Select(z => RoundPrice(symbol, z)).ToList();
+
+        // Zona güclərini topla (hər zona qiyməti → touch count).
+        // Şəkildə güclü zonalar qalın göstərilsin deyə.
+        var zoneStrengths = new Dictionary<string, int>();
+        var allClusters = highClusters.Concat(lowClusters).ToList();
+        foreach (var z in sellZones.Concat(buyZones))
+        {
+            var match = allClusters
+                .OrderBy(c => Math.Abs(c.Price - z))
+                .FirstOrDefault();
+            var touches = match?.Touches ?? 1;
+            zoneStrengths[z.ToString(CultureInfo.InvariantCulture)] = touches;
+        }
+
+        // ===== RR PLANLARI — REAL SƏVİYYƏLƏRƏ ƏSASLANIR =====
+        // Süni məsafə YOX. SL və TP real bazar səviyyələridir:
+        //   BUY: zonadan al. SL = altdakı növbəti dəstək (növbəti buy zona / şah).
+        //        TP = üstdəki növbəti müqavimət (növbəti zona / tərs zona).
+        //   SELL: tərsinə.
+        // RR bu real məsafələrdən HESABLANIR (1:1, 1:2 məcbur edilmir).
+        var tradePlans = new List<ZoneTradePlan>();
+        var activeZonesForPlan = bias == "SELL" ? sellZones : buyZones;
+
+        // Bütün struktur səviyyələri (SL/TP üçün hədəf ola bilər).
+        var allLevelsForPlan = new List<decimal>();
+        allLevelsForPlan.AddRange(sellZones);
+        allLevelsForPlan.AddRange(buyZones);
+        allLevelsForPlan.Add(decisionPoint);
+        if (counterZone > 0) allLevelsForPlan.Add(counterZone);
+        allLevelsForPlan = allLevelsForPlan.Distinct().OrderBy(x => x).ToList();
+
+        foreach (var zone in activeZonesForPlan)
+        {
+            decimal stopLoss, takeProfit;
+
+            if (bias == "BUY")
+            {
+                // SL: zonadan AŞAĞIDA olan ən yaxın səviyyə (növbəti dəstək / şah).
+                var below = allLevelsForPlan.Where(l => l < zone).ToList();
+                stopLoss = below.Count > 0 ? below.Max() : decisionPoint;
+
+                // TP: zonadan YUXARIDA olan ən yaxın səviyyə (növbəti müqavimət / tərs zona).
+                var above = allLevelsForPlan.Where(l => l > zone).ToList();
+                takeProfit = above.Count > 0 ? above.Min() : (counterZone > 0 ? counterZone : zone + (zone - stopLoss));
+            }
+            else
+            {
+                // SELL: SL yuxarıda, TP aşağıda.
+                var above = allLevelsForPlan.Where(l => l > zone).ToList();
+                stopLoss = above.Count > 0 ? above.Min() : decisionPoint;
+
+                var below = allLevelsForPlan.Where(l => l < zone).ToList();
+                takeProfit = below.Count > 0 ? below.Max() : (counterZone > 0 ? counterZone : zone - (stopLoss - zone));
+            }
+
+            // RR hesabla: risk = |zona - SL|, reward = |TP - zona|.
+            var risk = Math.Abs(zone - stopLoss);
+            var reward = Math.Abs(takeProfit - zone);
+            var rr = risk > 0 ? reward / risk : 0;
+
+            var zKey = zone.ToString(CultureInfo.InvariantCulture);
+            var zTouches = zoneStrengths.ContainsKey(zKey) ? zoneStrengths[zKey] : 1;
+            var zStrength = zTouches >= 3 ? "GÜCLÜ" : zTouches == 2 ? "orta" : "zəif";
+
+            tradePlans.Add(new ZoneTradePlan
+            {
+                Zone = zone,
+                Strength = zStrength,
+                StopLoss = RoundPrice(symbol, stopLoss),
+                TakeProfit1 = RoundPrice(symbol, takeProfit),
+                TakeProfit2 = 0,   // real hədəf tək — TP2 istifadə olunmur
+                RiskDistance = RoundPrice(symbol, risk),
+                RiskReward = Math.Round(rr, 2)
+            });
+        }
+
+        var note = BuildBiasNote(symbol, bias, sellZones, buyZones, decisionPoint, nearestZone, counterZone, zoneStrengths, tradePlans);
 
         var direction = bias == "SELL" ? "SHORT"
             : bias == "BUY" ? "LONG"
@@ -273,6 +361,8 @@ public class CoreForexSignalService : IForexSignalService
             NearestZone = RoundPrice(symbol, nearestZone),
             CounterZone = counterZone > 0 ? RoundPrice(symbol, counterZone) : 0,
             Timeframe = tf.Interval,
+            ZoneStrengths = zoneStrengths,
+            TradePlans = tradePlans,
             LastPrice = RoundPrice(symbol, lastPrice),
             BiasNote = note,
 
@@ -572,11 +662,18 @@ public class CoreForexSignalService : IForexSignalService
                 if (j == i)
                     continue;
 
-                if (candles[i].High <= candles[j].High)
-                    isHigh = false;
-
-                if (candles[i].Low >= candles[j].Low)
-                    isLow = false;
+                // Sol tərəf strict (>), sağ tərəf bərabərliyə icazə (>=) —
+                // eyni qiymətli qonşu şamlar swing-i tam bloklamasın (BTC kimi datada vacib).
+                if (j < i)
+                {
+                    if (candles[i].High <= candles[j].High) isHigh = false;
+                    if (candles[i].Low >= candles[j].Low) isLow = false;
+                }
+                else
+                {
+                    if (candles[i].High < candles[j].High) isHigh = false;
+                    if (candles[i].Low > candles[j].Low) isLow = false;
+                }
             }
 
             if (isHigh)
@@ -598,9 +695,18 @@ public class CoreForexSignalService : IForexSignalService
         List<decimal> buyZones,
         decimal decisionPoint,
         decimal nearestZone,
-        decimal counterZone)
+        decimal counterZone,
+        Dictionary<string, int> zoneStrengths,
+        List<ZoneTradePlan> tradePlans)
     {
         var lines = new List<string>();
+
+        string StrengthOf(decimal z)
+        {
+            var key = z.ToString(CultureInfo.InvariantCulture);
+            var t = zoneStrengths != null && zoneStrengths.ContainsKey(key) ? zoneStrengths[key] : 1;
+            return t >= 3 ? "GÜCLÜ" : t == 2 ? "orta" : "zəif";
+        }
 
         if (bias == "SELL")
         {
@@ -608,7 +714,7 @@ public class CoreForexSignalService : IForexSignalService
             lines.Add("");
             lines.Add("🔴 SELL zonaları:");
             foreach (var z in sellZones)
-                lines.Add($"• Sell zone: {FormatPrice(symbol, z)}");
+                lines.Add($"• Sell zone: {FormatPrice(symbol, z)} ({StrengthOf(z)})");
         }
         else if (bias == "BUY")
         {
@@ -616,7 +722,7 @@ public class CoreForexSignalService : IForexSignalService
             lines.Add("");
             lines.Add("🟢 BUY zonaları:");
             foreach (var z in buyZones)
-                lines.Add($"• Buy zone: {FormatPrice(symbol, z)}");
+                lines.Add($"• Buy zone: {FormatPrice(symbol, z)} ({StrengthOf(z)})");
         }
         else
         {
@@ -634,6 +740,23 @@ public class CoreForexSignalService : IForexSignalService
         lines.Add("");
         lines.Add($"🎯 Ən yaxın zona: {FormatPrice(symbol, nearestZone)}");
         lines.Add("⚠️ Riskinizi düzgün idarə edin.");
+
+        // ===== RR PLANLARI (real səviyyələr) =====
+        if (tradePlans != null && tradePlans.Count > 0)
+        {
+            lines.Add("");
+            lines.Add("📋 Əməliyyat planı (real səviyyələr):");
+            foreach (var p in tradePlans)
+            {
+                var rrText = p.RiskReward >= 2 ? $"1:{p.RiskReward:0.0} ✅ (əla)"
+                    : p.RiskReward >= 1 ? $"1:{p.RiskReward:0.0} (yaxşı)"
+                    : $"1:{p.RiskReward:0.0} ⚠️ (zəif RR)";
+                lines.Add($"▸ Giriş {FormatPrice(symbol, p.Zone)} ({p.Strength})");
+                lines.Add($"   SL: {FormatPrice(symbol, p.StopLoss)} | TP: {FormatPrice(symbol, p.TakeProfit1)} | RR: {rrText}");
+            }
+            lines.Add("");
+            lines.Add("✅ GÜCLÜ zona + RR 1:2 = ən etibarlı giriş. Zəif zona / RR 1:1-dən aşağı = ehtiyatlı ol.");
+        }
 
         return string.Join("\n", lines);
     }

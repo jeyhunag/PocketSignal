@@ -1,7 +1,10 @@
 {
   "binaryEnabled": false,
-  "binaryActiveSymbol": "EUR/USD",
-  "binaryActiveSymbols": [],
+  "binaryActiveSymbol": "USD/CAD",
+  "binaryActiveSymbols": [
+    "USD/CAD",
+    "EUR/AUD"
+  ],
   "binarySymbols": [
     "EUR/USD",
     "GBP/USD",
@@ -24,9 +27,10 @@
   ],
   "forexEnabled": true,
   "forexTimeframe": "1min",
-  "binaryTimeframe": "5min",
-  "forexActiveSymbol": "BTC/USD",
+  "binaryTimeframe": "1min",
+  "forexActiveSymbol": "EUR/USD",
   "forexActiveSymbols": [
+    "EUR/USD",
     "BTC/USD"
   ],
   "forexSymbols": [
@@ -63,5 +67,5 @@
   "mt5MaxTradesPerDay": 20,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-08-16T10:05:10.952461Z"
+  "updatedAtUtc": "2026-08-17T19:14:56.8716036Z"
 }

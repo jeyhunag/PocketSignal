@@ -324,6 +324,10 @@ public class AdminController : ControllerBase
             ? string.Join(", ", settings.ForexActiveSymbols)
             : settings.ForexActiveSymbol;
 
+        var activeBinarySymbolsText = settings.BinaryActiveSymbols.Count > 0
+            ? string.Join(", ", settings.BinaryActiveSymbols)
+            : settings.BinaryActiveSymbol;
+
         var firstForexSymbol = settings.ForexActiveSymbols.Count > 0
             ? settings.ForexActiveSymbols.First()
             : settings.ForexActiveSymbol;
@@ -807,7 +811,7 @@ public class AdminController : ControllerBase
             Binary:
             <span id="binaryState">{{(settings.BinaryEnabled ? "Aktiv" : "Deaktiv")}}</span>
             /
-            <strong id="binarySymbol">{{WebUtility.HtmlEncode(settings.BinaryActiveSymbol)}}</strong>
+            <strong id="binarySymbol">{{WebUtility.HtmlEncode(activeBinarySymbolsText)}}</strong>
         </p>
 
         <p>

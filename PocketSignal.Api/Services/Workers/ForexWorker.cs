@@ -126,15 +126,18 @@ public class ForexWorker : BackgroundService
                     signal.Confidence);
 
                 _logger.LogInformation(
-                    "FOREX | Symbol: {Symbol} | Direction: {Direction} | Confidence: {Confidence} | Sent: {Sent} | Message: {Message}",
+                    "FOREX | Symbol: {Symbol} | Bias: {Bias} | Direction: {Direction} | Sent: {Sent} | Sebeb: {Note} | Message: {Message}",
                     signal.Symbol,
+                    signal.Bias,
                     signal.Direction,
-                    signal.Confidence,
                     result.Sent,
+                    signal.BiasNote,
                     result.Message);
 
+                // TwelveData limiti: 8 sorğu/dəqiqə. Hər cüt bir neçə sorğu edir.
+                // 429-un qarşısını almaq üçün cütlər arası kifayət qədər fasilə.
                 await Task.Delay(
-                    TimeSpan.FromMilliseconds(700),
+                    TimeSpan.FromSeconds(8),
                     cancellationToken);
             }
             catch (OperationCanceledException)

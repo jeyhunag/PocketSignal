@@ -142,7 +142,7 @@ public class ForexNotificationService : IForexNotificationService
             ? signal.Message
             : signal.BiasNote;
 
-        return $"{icon} Cassandra Analysis - GOLD\n\n{changeBanner}{header}{body}";
+        return $"{icon} {signal.Symbol} | Bias: {signal.Bias}\n\n{changeBanner}{body}";
     }
 
     private async Task<string?> TryCreateChartImageAsync(
