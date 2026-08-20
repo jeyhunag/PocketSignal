@@ -264,51 +264,85 @@ public class CoreForexSignalService : IForexSignalService
             zoneStrengths[z.ToString(CultureInfo.InvariantCulture)] = touches;
         }
 
-        // ===== RR PLANLARI — REAL SƏVİYYƏLƏRƏ ƏSASLANIR =====
-        // Süni məsafə YOX. SL və TP real bazar səviyyələridir:
-        //   BUY: zonadan al. SL = altdakı növbəti dəstək (növbəti buy zona / şah).
-        //        TP = üstdəki növbəti müqavimət (növbəti zona / tərs zona).
-        //   SELL: tərsinə.
-        // RR bu real məsafələrdən HESABLANIR (1:1, 1:2 məcbur edilmir).
+        // ===== RR PLANLARI — ATR ilə vəziyyətə uyğun, YAXIN və GÜVƏNLİ =====
+        //
+        // Prinsip (peşəkar):
+        //  1) SL "zona həqiqətən qırıldı" nöqtəsindədir — zonanı formalaşdıran ən
+        //     kənar swing-in (dib/pik) bir az o tərəfi. Düz zona kənarına stop
+        //     qoymaqdan güvənlidir (noise-a tab gətirir), amma uzaq zonaya getmir.
+        //  2) SL/TP buferi ATR-ə (son volatilliyə) görə hesablanır — sakit bazarda
+        //     dar, hərəkətli bazarda geniş. Sabit deyil, vəziyyətə uyğundur.
+        //  3) TP zonadan sonrakı ən yaxın struktur maneəsi (tez çatılan hədəf);
+        //     TP2 daha uzaq maneə (runner üçün).
+        //  4) RR strukturdan hesablanır; 1:1-dən aşağı düşməsin, 1:3-dən çox qovmasın.
+        //
+        var atr = ComputeAtr(candles, 14);
+        if (atr <= 0) atr = lastPrice * 0.0005m;
+
+        var buffer = atr * 0.35m;      // spread/noise buferi (volatilliyə uyğun)
+        var zoneBand = atr * 0.6m;     // zonanı formalaşdıran swing-ləri tutmaq bandı
+
         var tradePlans = new List<ZoneTradePlan>();
         var activeZonesForPlan = bias == "SELL" ? sellZones : buyZones;
 
-        // Bütün struktur səviyyələri (SL/TP üçün hədəf ola bilər).
-        var allLevelsForPlan = new List<decimal>();
-        allLevelsForPlan.AddRange(sellZones);
-        allLevelsForPlan.AddRange(buyZones);
-        allLevelsForPlan.Add(decisionPoint);
-        if (counterZone > 0) allLevelsForPlan.Add(counterZone);
-        allLevelsForPlan = allLevelsForPlan.Distinct().OrderBy(x => x).ToList();
+        var allSwingLows = swingLows.Select(s => s.Price).ToList();
+        var allSwingHighs = swingHighs.Select(s => s.Price).ToList();
 
         foreach (var zone in activeZonesForPlan)
         {
-            decimal stopLoss, takeProfit;
+            decimal stopLoss, tp1, tp2, risk;
 
             if (bias == "BUY")
             {
-                // SL: zonadan AŞAĞIDA olan ən yaxın səviyyə (növbəti dəstək / şah).
-                var below = allLevelsForPlan.Where(l => l < zone).ToList();
-                stopLoss = below.Count > 0 ? below.Max() : decisionPoint;
+                // Zonanın öz struktur dibi: onu formalaşdıran ən aşağı swing low.
+                var formingLows = allSwingLows
+                    .Where(l => l >= zone - zoneBand && l <= zone + zoneBand * 0.3m)
+                    .ToList();
+                var zoneFloor = formingLows.Count > 0 ? formingLows.Min() : zone - atr * 0.5m;
 
-                // TP: zonadan YUXARIDA olan ən yaxın səviyyə (növbəti müqavimət / tərs zona).
-                var above = allLevelsForPlan.Where(l => l > zone).ToList();
-                takeProfit = above.Count > 0 ? above.Min() : (counterZone > 0 ? counterZone : zone + (zone - stopLoss));
+                stopLoss = zoneFloor - buffer;
+                // SL zonaya yapışmasın — heç olmasa 0.3×ATR aşağıda.
+                stopLoss = Math.Min(stopLoss, zone - atr * 0.3m);
+                risk = zone - stopLoss;
+
+                // TP: zonadan yuxarı ən yaxın maneə(lər).
+                var peaksAbove = allSwingHighs
+                    .Where(h => h > zone + buffer)
+                    .OrderBy(h => h)
+                    .ToList();
+
+                tp1 = peaksAbove.Count >= 1 ? peaksAbove[0] - buffer : zone + risk * 1.5m;
+                tp1 = ClampDecimal(tp1, zone + risk * 1.0m, zone + risk * 3.0m);
+
+                tp2 = peaksAbove.Count >= 2 ? peaksAbove[1] - buffer : zone + risk * 2.0m;
+                tp2 = ClampDecimal(tp2, tp1 + risk * 0.5m, zone + risk * 5.0m);
             }
-            else
+            else // SELL
             {
-                // SELL: SL yuxarıda, TP aşağıda.
-                var above = allLevelsForPlan.Where(l => l > zone).ToList();
-                stopLoss = above.Count > 0 ? above.Min() : decisionPoint;
+                // Zonanın öz struktur tavanı: onu formalaşdıran ən yuxarı swing high.
+                var formingHighs = allSwingHighs
+                    .Where(h => h <= zone + zoneBand && h >= zone - zoneBand * 0.3m)
+                    .ToList();
+                var zoneCeil = formingHighs.Count > 0 ? formingHighs.Max() : zone + atr * 0.5m;
 
-                var below = allLevelsForPlan.Where(l => l < zone).ToList();
-                takeProfit = below.Count > 0 ? below.Max() : (counterZone > 0 ? counterZone : zone - (stopLoss - zone));
+                stopLoss = zoneCeil + buffer;
+                stopLoss = Math.Max(stopLoss, zone + atr * 0.3m);
+                risk = stopLoss - zone;
+
+                var dipsBelow = allSwingLows
+                    .Where(l => l < zone - buffer)
+                    .OrderByDescending(l => l)
+                    .ToList();
+
+                tp1 = dipsBelow.Count >= 1 ? dipsBelow[0] + buffer : zone - risk * 1.5m;
+                tp1 = ClampDecimal(tp1, zone - risk * 3.0m, zone - risk * 1.0m);
+
+                tp2 = dipsBelow.Count >= 2 ? dipsBelow[1] + buffer : zone - risk * 2.0m;
+                tp2 = ClampDecimal(tp2, zone - risk * 5.0m, tp1 - risk * 0.5m);
             }
 
-            // RR hesabla: risk = |zona - SL|, reward = |TP - zona|.
-            var risk = Math.Abs(zone - stopLoss);
-            var reward = Math.Abs(takeProfit - zone);
-            var rr = risk > 0 ? reward / risk : 0;
+            var reward1 = Math.Abs(tp1 - zone);
+            var rr = risk > 0 ? reward1 / risk : 0;
 
             var zKey = zone.ToString(CultureInfo.InvariantCulture);
             var zTouches = zoneStrengths.ContainsKey(zKey) ? zoneStrengths[zKey] : 1;
@@ -319,8 +353,8 @@ public class CoreForexSignalService : IForexSignalService
                 Zone = zone,
                 Strength = zStrength,
                 StopLoss = RoundPrice(symbol, stopLoss),
-                TakeProfit1 = RoundPrice(symbol, takeProfit),
-                TakeProfit2 = 0,   // real hədəf tək — TP2 istifadə olunmur
+                TakeProfit1 = RoundPrice(symbol, tp1),
+                TakeProfit2 = RoundPrice(symbol, tp2),
                 RiskDistance = RoundPrice(symbol, risk),
                 RiskReward = Math.Round(rr, 2)
             });
@@ -741,21 +775,23 @@ public class CoreForexSignalService : IForexSignalService
         lines.Add($"🎯 Ən yaxın zona: {FormatPrice(symbol, nearestZone)}");
         lines.Add("⚠️ Riskinizi düzgün idarə edin.");
 
-        // ===== RR PLANLARI (real səviyyələr) =====
+        // ===== RR PLANLARI (yaxın & güvənli, ATR əsaslı) =====
         if (tradePlans != null && tradePlans.Count > 0)
         {
             lines.Add("");
-            lines.Add("📋 Əməliyyat planı (real səviyyələr):");
+            lines.Add("📋 Əməliyyat planı (yaxın & güvənli):");
             foreach (var p in tradePlans)
             {
-                var rrText = p.RiskReward >= 2 ? $"1:{p.RiskReward:0.0} ✅ (əla)"
-                    : p.RiskReward >= 1 ? $"1:{p.RiskReward:0.0} (yaxşı)"
-                    : $"1:{p.RiskReward:0.0} ⚠️ (zəif RR)";
-                lines.Add($"▸ Giriş {FormatPrice(symbol, p.Zone)} ({p.Strength})");
-                lines.Add($"   SL: {FormatPrice(symbol, p.StopLoss)} | TP: {FormatPrice(symbol, p.TakeProfit1)} | RR: {rrText}");
+                var rrText = p.RiskReward >= 2 ? $"1:{p.RiskReward:0.0} ✅ əla"
+                    : p.RiskReward >= 1.3m ? $"1:{p.RiskReward:0.0} yaxşı"
+                    : p.RiskReward >= 1 ? $"1:{p.RiskReward:0.0}"
+                    : $"1:{p.RiskReward:0.0} ⚠️ zəif RR";
+                lines.Add($"▸ Giriş: {FormatPrice(symbol, p.Zone)} ({p.Strength}) — RR {rrText}");
+                lines.Add($"   SL: {FormatPrice(symbol, p.StopLoss)}  |  TP1: {FormatPrice(symbol, p.TakeProfit1)}  |  TP2: {FormatPrice(symbol, p.TakeProfit2)}");
             }
             lines.Add("");
-            lines.Add("✅ GÜCLÜ zona + RR 1:2 = ən etibarlı giriş. Zəif zona / RR 1:1-dən aşağı = ehtiyatlı ol.");
+            lines.Add("✅ Ən etibarlı giriş: GÜCLÜ zona + RR 1:2 və yuxarı.");
+            lines.Add("⚠️ Zəif zona və ya RR 1:1-dən aşağı olan zonalarda ehtiyatlı ol.");
         }
 
         return string.Join("\n", lines);
@@ -831,6 +867,39 @@ public class CoreForexSignalService : IForexSignalService
         if (s.Contains("BTC") || s.Contains("ETH")) return 2;
         if (s.Contains("USOIL")) return 2;
         return 5;   // standart forex (EUR/USD, GBP/USD və s.)
+    }
+
+    // ATR (Average True Range) — son volatilliyin ölçüsü.
+    // SL/TP buferini bazarın hərəkətliliyinə uyğunlaşdırmaq üçün.
+    private static decimal ComputeAtr(List<Candle> candles, int period)
+    {
+        if (candles.Count < 2)
+            return candles.Count > 0 ? candles[^1].High - candles[^1].Low : 0m;
+
+        if (period > candles.Count - 1)
+            period = candles.Count - 1;
+
+        decimal sum = 0m;
+        var count = 0;
+        for (var i = candles.Count - period; i < candles.Count; i++)
+        {
+            if (i <= 0) continue;
+            var high = candles[i].High;
+            var low = candles[i].Low;
+            var prevClose = candles[i - 1].Close;
+            var tr = Math.Max(high - low,
+                     Math.Max(Math.Abs(high - prevClose), Math.Abs(low - prevClose)));
+            sum += tr;
+            count++;
+        }
+
+        return count > 0 ? sum / count : candles[^1].High - candles[^1].Low;
+    }
+
+    private static decimal ClampDecimal(decimal value, decimal lo, decimal hi)
+    {
+        if (lo > hi) (lo, hi) = (hi, lo);   // təhlükəsizlik
+        return value < lo ? lo : value > hi ? hi : value;
     }
 
     private static decimal RoundPrice(string symbol, decimal price)
