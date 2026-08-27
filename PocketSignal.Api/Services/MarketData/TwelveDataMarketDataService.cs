@@ -127,6 +127,8 @@ public class TwelveDataMarketDataService : IMarketDataService
             "15min" => TimeSpan.FromMinutes(14),
             "30min" => TimeSpan.FromMinutes(29),
             "1h" => TimeSpan.FromMinutes(55),
+            "2h" => TimeSpan.FromMinutes(110),
+            "4h" => TimeSpan.FromHours(3),
             _ => TimeSpan.FromSeconds(30)
         };
     }

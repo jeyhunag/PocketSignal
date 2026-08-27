@@ -178,12 +178,8 @@ public class ForexWorker : BackgroundService
             result.Add(settings.ForexActiveSymbol);
         }
 
-        // === QIZIL HƏMİŞƏ İŞLƏSİN ===
-        // XAU/USD checkbox seçilsə də, seçilməsə də hər zaman analiz olunur (Cassandra).
-        // Digər cütlər yalnız seçiləndə işləyir.
-        const string gold = "XAU/USD";
-        if (!result.Any(s => s.Equals(gold, StringComparison.OrdinalIgnoreCase)))
-            result.Insert(0, gold);
+        // Qızıl (XAU/USD) da digər cütlər kimi — yalnız seçiləndə işləyir.
+        // (Əvvəlki "həmişə işlə" məcburiyyəti götürüldü.)
 
         return result;
     }

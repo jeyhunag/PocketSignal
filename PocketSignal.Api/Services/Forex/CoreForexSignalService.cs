@@ -30,30 +30,40 @@ public class CoreForexSignalService : IForexSignalService
 
     private const int CandleCount = 300;
 
-    // Neçə zona göstərilsin — real support/resistance neçə varsa (maksimum bu qədər).
-    private const int MaxZones = 5;
+    // Neçə zona göstərilsin — az, keyfiyyətli (orijinal Cassandra kimi).
+    private const int MaxZones = 3;
+
+    // Zona ən azı neçə dəfə toxunulmalıdır ki, göstərilsin.
+    // 2+ = ən azı iki dəfə test olunmuş real səviyyə. 1 (zəif) atılır — pul üçün vacibdir.
+    private const int MinZoneTouches = 2;
 
     // Biasa TƏRS zona üçün minimum toxunuş sayı — bundan az olsa göstərilmir.
     // 3+ toxunuş = həqiqətən güclü səviyyə (2 çox zəifdir, uydurma olar).
     private const int MinCounterTouches = 3;
 
-    // ==================== TIMEFRAME PARAMETRLƏRİ ====================
-    // M15 optimaldır (toxunulmur). M1/M5 M15 keyfiyyətinə uyğunlaşdırılıb:
-    // kiçik TF-də daha çox şam + daha geniş swing (noise-a qarşı) + daha dar tolerans.
+    // ==================== TIMEFRAME PARAMETRLƏRİ (MTF) ====================
+    // Hər seçilmiş TF öz "böyük qardaşı" ilə cütlənir:
+    //   giriş/bias kiçik TF-dən, ƏSAS güclü zonalar böyük TF-dən.
+    //   1M → 5M | 5M → 1H | 15M → 4H
     private sealed record TfParams(
-        string Interval,
+        string Interval,             // giriş timeframe-i (kiçik)
         int TrendLookback,
         int SwingLeft,
         int SwingRight,
-        decimal ZoneTolerancePct);
+        decimal ZoneTolerancePct,
+        string HigherInterval,       // əsas zonalar üçün böyük timeframe
+        decimal HigherTolerancePct); // böyük TF-də zona toleransı
 
     private static TfParams GetTfParams(string timeframe)
     {
         return timeframe switch
         {
-            "1min" => new TfParams("1min", 120, 5, 5, 0.0008m),
-            "5min" => new TfParams("5min", 80, 5, 5, 0.0012m),
-            _ => new TfParams("15min", 60, 4, 4, 0.0015m)   // M15 — OPTIMAL, toxunulmaz
+            // giriş 1M, əsas zonalar 5M
+            "1min" => new TfParams("1min", 120, 5, 5, 0.0012m, "5min", 0.0018m),
+            // giriş 5M, əsas zonalar 1 saat
+            "5min" => new TfParams("5min", 80, 5, 5, 0.0018m, "1h", 0.0030m),
+            // giriş 15M, əsas zonalar 4 saat
+            _ => new TfParams("15min", 60, 4, 4, 0.0022m, "4h", 0.0045m)
         };
     }
 
@@ -100,7 +110,7 @@ public class CoreForexSignalService : IForexSignalService
 
         var lastPrice = candles[^1].Close;
 
-        // ===== SWING nöqtələri =====
+        // ===== SWING nöqtələri (kiçik TF — giriş/bias) =====
         var swings = FindSwings(candles, tf.SwingLeft, tf.SwingRight);
 
         var swingHighs = swings.Where(x => x.Kind == "HIGH").OrderBy(x => x.Index).ToList();
@@ -117,6 +127,28 @@ public class CoreForexSignalService : IForexSignalService
 
         if (swingHighs.Count < 3 || swingLows.Count < 3)
             return Wait(symbol, "Cassandra: kifayət qədər swing nöqtəsi tapılmadı.");
+
+        // ===== BÖYÜK TF SWING-LƏRİ (əsas, güclü zonalar üçün) =====
+        // 1M→5M, 5M→1H, 15M→4H. Böyük TF-in swing-ləri əsas səviyyələri verir.
+        var higherHighs = new List<SwingPoint>();
+        var higherLows = new List<SwingPoint>();
+        try
+        {
+            var higherResponse = await _marketDataService.GetCandlesAsync(
+                symbol, tf.HigherInterval, 200, cancellationToken);
+            var higherCandles = MapCandles(higherResponse, symbol);
+
+            if (higherCandles.Count >= 30)
+            {
+                var hSwings = FindSwings(higherCandles, 3, 3);
+                higherHighs = hSwings.Where(x => x.Kind == "HIGH").ToList();
+                higherLows = hSwings.Where(x => x.Kind == "LOW").ToList();
+            }
+        }
+        catch
+        {
+            // Böyük TF datası gəlməsə (limit/xəta), yalnız kiçik TF ilə davam et.
+        }
 
         // ===== 1) BIAS (struktur qırılması əsasında) =====
         var rawBias = DetermineBias(candles, swingHighs, swingLows, tf.TrendLookback);
@@ -143,15 +175,42 @@ public class CoreForexSignalService : IForexSignalService
         var sellZones = new List<decimal>();
         var buyZones = new List<decimal>();
 
+        // ===== ZONA CLUSTER-LƏRİ (kiçik + BÖYÜK TF birləşir) =====
+        // Kiçik TF cluster-ləri (dəqiq) + böyük TF cluster-ləri (əsas, güclü).
+        // Böyük TF zonaları daha etibarlıdır → onlara güc bonusu verilir.
         var highClusters = ClusterLevelsTol(swingHighs.Select(x => x.Price).ToList(), lastPrice, tf.ZoneTolerancePct);
         var lowClusters = ClusterLevelsTol(swingLows.Select(x => x.Price).ToList(), lastPrice, tf.ZoneTolerancePct);
 
+        // Böyük TF cluster-ləri (əsas səviyyələr).
+        if (higherHighs.Count >= 2)
+        {
+            var hHigh = ClusterLevelsTol(higherHighs.Select(x => x.Price).ToList(), lastPrice, tf.HigherTolerancePct);
+            // Böyük TF zonasına +2 güc bonusu (əsas səviyyə, daha etibarlı).
+            foreach (var c in hHigh) c.Touches += 2;
+            highClusters = MergeClusters(highClusters, hHigh, lastPrice, tf.ZoneTolerancePct);
+        }
+        if (higherLows.Count >= 2)
+        {
+            var hLow = ClusterLevelsTol(higherLows.Select(x => x.Price).ToList(), lastPrice, tf.HigherTolerancePct);
+            foreach (var c in hLow) c.Touches += 2;
+            lowClusters = MergeClusters(lowClusters, hLow, lastPrice, tf.ZoneTolerancePct);
+        }
+
         if (bias == "SELL")
         {
-            // SELL zonaları: qiymətdən YUXARIDAKI resistance səviyyələri.
-            sellZones = highClusters
-                .Where(c => c.Price >= lastPrice)
-                .OrderBy(c => Math.Abs(c.Price - lastPrice))
+            // SELL zonaları: qiymətdən YUXARIDAKI GÜCLÜ resistance səviyyələri.
+            // Əvvəl güclü (çox toxunulan), sonra yaxın olanlar. Zəif (1 toxunuş) atılır.
+            var candidates = highClusters
+                .Where(c => c.Price >= lastPrice && c.Touches >= MinZoneTouches)
+                .ToList();
+
+            // Kifayət qədər güclü zona yoxdursa, filtri bir az endir (heç olmasa nəsə göstər).
+            if (candidates.Count == 0)
+                candidates = highClusters.Where(c => c.Price >= lastPrice).ToList();
+
+            sellZones = candidates
+                .OrderByDescending(c => c.Touches)                    // əvvəl güclülər
+                .ThenBy(c => Math.Abs(c.Price - lastPrice))           // sonra yaxınlar
                 .Take(MaxZones)
                 .Select(c => c.Price)
                 .OrderBy(p => p)
@@ -159,10 +218,17 @@ public class CoreForexSignalService : IForexSignalService
         }
         else if (bias == "BUY")
         {
-            // BUY zonaları: qiymətdən AŞAĞIDAKI support səviyyələri.
-            buyZones = lowClusters
-                .Where(c => c.Price <= lastPrice)
-                .OrderBy(c => Math.Abs(c.Price - lastPrice))
+            // BUY zonaları: qiymətdən AŞAĞIDAKI GÜCLÜ support səviyyələri.
+            var candidates = lowClusters
+                .Where(c => c.Price <= lastPrice && c.Touches >= MinZoneTouches)
+                .ToList();
+
+            if (candidates.Count == 0)
+                candidates = lowClusters.Where(c => c.Price <= lastPrice).ToList();
+
+            buyZones = candidates
+                .OrderByDescending(c => c.Touches)
+                .ThenBy(c => Math.Abs(c.Price - lastPrice))
                 .Take(MaxZones)
                 .Select(c => c.Price)
                 .OrderByDescending(p => p)
@@ -264,103 +330,7 @@ public class CoreForexSignalService : IForexSignalService
             zoneStrengths[z.ToString(CultureInfo.InvariantCulture)] = touches;
         }
 
-        // ===== RR PLANLARI — ATR ilə vəziyyətə uyğun, YAXIN və GÜVƏNLİ =====
-        //
-        // Prinsip (peşəkar):
-        //  1) SL "zona həqiqətən qırıldı" nöqtəsindədir — zonanı formalaşdıran ən
-        //     kənar swing-in (dib/pik) bir az o tərəfi. Düz zona kənarına stop
-        //     qoymaqdan güvənlidir (noise-a tab gətirir), amma uzaq zonaya getmir.
-        //  2) SL/TP buferi ATR-ə (son volatilliyə) görə hesablanır — sakit bazarda
-        //     dar, hərəkətli bazarda geniş. Sabit deyil, vəziyyətə uyğundur.
-        //  3) TP zonadan sonrakı ən yaxın struktur maneəsi (tez çatılan hədəf);
-        //     TP2 daha uzaq maneə (runner üçün).
-        //  4) RR strukturdan hesablanır; 1:1-dən aşağı düşməsin, 1:3-dən çox qovmasın.
-        //
-        var atr = ComputeAtr(candles, 14);
-        if (atr <= 0) atr = lastPrice * 0.0005m;
-
-        var buffer = atr * 0.35m;      // spread/noise buferi (volatilliyə uyğun)
-        var zoneBand = atr * 0.6m;     // zonanı formalaşdıran swing-ləri tutmaq bandı
-
-        var tradePlans = new List<ZoneTradePlan>();
-        var activeZonesForPlan = bias == "SELL" ? sellZones : buyZones;
-
-        var allSwingLows = swingLows.Select(s => s.Price).ToList();
-        var allSwingHighs = swingHighs.Select(s => s.Price).ToList();
-
-        foreach (var zone in activeZonesForPlan)
-        {
-            decimal stopLoss, tp1, tp2, risk;
-
-            if (bias == "BUY")
-            {
-                // Zonanın öz struktur dibi: onu formalaşdıran ən aşağı swing low.
-                var formingLows = allSwingLows
-                    .Where(l => l >= zone - zoneBand && l <= zone + zoneBand * 0.3m)
-                    .ToList();
-                var zoneFloor = formingLows.Count > 0 ? formingLows.Min() : zone - atr * 0.5m;
-
-                stopLoss = zoneFloor - buffer;
-                // SL zonaya yapışmasın — heç olmasa 0.3×ATR aşağıda.
-                stopLoss = Math.Min(stopLoss, zone - atr * 0.3m);
-                risk = zone - stopLoss;
-
-                // TP: zonadan yuxarı ən yaxın maneə(lər).
-                var peaksAbove = allSwingHighs
-                    .Where(h => h > zone + buffer)
-                    .OrderBy(h => h)
-                    .ToList();
-
-                tp1 = peaksAbove.Count >= 1 ? peaksAbove[0] - buffer : zone + risk * 1.5m;
-                tp1 = ClampDecimal(tp1, zone + risk * 1.0m, zone + risk * 3.0m);
-
-                tp2 = peaksAbove.Count >= 2 ? peaksAbove[1] - buffer : zone + risk * 2.0m;
-                tp2 = ClampDecimal(tp2, tp1 + risk * 0.5m, zone + risk * 5.0m);
-            }
-            else // SELL
-            {
-                // Zonanın öz struktur tavanı: onu formalaşdıran ən yuxarı swing high.
-                var formingHighs = allSwingHighs
-                    .Where(h => h <= zone + zoneBand && h >= zone - zoneBand * 0.3m)
-                    .ToList();
-                var zoneCeil = formingHighs.Count > 0 ? formingHighs.Max() : zone + atr * 0.5m;
-
-                stopLoss = zoneCeil + buffer;
-                stopLoss = Math.Max(stopLoss, zone + atr * 0.3m);
-                risk = stopLoss - zone;
-
-                var dipsBelow = allSwingLows
-                    .Where(l => l < zone - buffer)
-                    .OrderByDescending(l => l)
-                    .ToList();
-
-                tp1 = dipsBelow.Count >= 1 ? dipsBelow[0] + buffer : zone - risk * 1.5m;
-                tp1 = ClampDecimal(tp1, zone - risk * 3.0m, zone - risk * 1.0m);
-
-                tp2 = dipsBelow.Count >= 2 ? dipsBelow[1] + buffer : zone - risk * 2.0m;
-                tp2 = ClampDecimal(tp2, zone - risk * 5.0m, tp1 - risk * 0.5m);
-            }
-
-            var reward1 = Math.Abs(tp1 - zone);
-            var rr = risk > 0 ? reward1 / risk : 0;
-
-            var zKey = zone.ToString(CultureInfo.InvariantCulture);
-            var zTouches = zoneStrengths.ContainsKey(zKey) ? zoneStrengths[zKey] : 1;
-            var zStrength = zTouches >= 3 ? "GÜCLÜ" : zTouches == 2 ? "orta" : "zəif";
-
-            tradePlans.Add(new ZoneTradePlan
-            {
-                Zone = zone,
-                Strength = zStrength,
-                StopLoss = RoundPrice(symbol, stopLoss),
-                TakeProfit1 = RoundPrice(symbol, tp1),
-                TakeProfit2 = RoundPrice(symbol, tp2),
-                RiskDistance = RoundPrice(symbol, risk),
-                RiskReward = Math.Round(rr, 2)
-            });
-        }
-
-        var note = BuildBiasNote(symbol, bias, sellZones, buyZones, decisionPoint, nearestZone, counterZone, zoneStrengths, tradePlans);
+        var note = BuildBiasNote(symbol, bias, sellZones, buyZones, decisionPoint, nearestZone, counterZone, zoneStrengths);
 
         var direction = bias == "SELL" ? "SHORT"
             : bias == "BUY" ? "LONG"
@@ -396,7 +366,6 @@ public class CoreForexSignalService : IForexSignalService
             CounterZone = counterZone > 0 ? RoundPrice(symbol, counterZone) : 0,
             Timeframe = tf.Interval,
             ZoneStrengths = zoneStrengths,
-            TradePlans = tradePlans,
             LastPrice = RoundPrice(symbol, lastPrice),
             BiasNote = note,
 
@@ -631,6 +600,41 @@ public class CoreForexSignalService : IForexSignalService
     /// Hər zona: orta qiymət + neçə swing ora düşüb (Touches).
     /// Çox toxunulan səviyyə = güclü support/resistance.
     /// </summary>
+    /// <summary>
+    /// İki cluster siyahısını birləşdirir. Yaxın cluster-lər (tolerans daxilində)
+    /// bir zonaya birləşir və güc (Touches) cəmlənir. Beləcə kiçik + böyük TF
+    /// eyni səviyyəni göstərirsə, o zona daha güclü olur.
+    /// </summary>
+    private static List<LevelCluster> MergeClusters(
+        List<LevelCluster> a,
+        List<LevelCluster> b,
+        decimal referencePrice,
+        decimal tolerancePct)
+    {
+        var tolerance = referencePrice * tolerancePct;
+        if (tolerance <= 0) tolerance = 1m;
+
+        var merged = new List<LevelCluster>(a);
+
+        foreach (var cb in b)
+        {
+            var near = merged.FirstOrDefault(m => Math.Abs(m.Price - cb.Price) <= tolerance);
+            if (near != null)
+            {
+                // Yaxın zona var — güclər birləşir, qiymət güc-ağırlıqlı orta.
+                var total = near.Touches + cb.Touches;
+                near.Price = (near.Price * near.Touches + cb.Price * cb.Touches) / total;
+                near.Touches = total;
+            }
+            else
+            {
+                merged.Add(new LevelCluster { Price = cb.Price, Touches = cb.Touches });
+            }
+        }
+
+        return merged.OrderByDescending(x => x.Touches).ToList();
+    }
+
     private static List<LevelCluster> ClusterLevelsTol(
         List<decimal> levels,
         decimal referencePrice,
@@ -730,8 +734,7 @@ public class CoreForexSignalService : IForexSignalService
         decimal decisionPoint,
         decimal nearestZone,
         decimal counterZone,
-        Dictionary<string, int> zoneStrengths,
-        List<ZoneTradePlan> tradePlans)
+        Dictionary<string, int> zoneStrengths)
     {
         var lines = new List<string>();
 
@@ -774,25 +777,6 @@ public class CoreForexSignalService : IForexSignalService
         lines.Add("");
         lines.Add($"🎯 Ən yaxın zona: {FormatPrice(symbol, nearestZone)}");
         lines.Add("⚠️ Riskinizi düzgün idarə edin.");
-
-        // ===== RR PLANLARI (yaxın & güvənli, ATR əsaslı) =====
-        if (tradePlans != null && tradePlans.Count > 0)
-        {
-            lines.Add("");
-            lines.Add("📋 Əməliyyat planı (yaxın & güvənli):");
-            foreach (var p in tradePlans)
-            {
-                var rrText = p.RiskReward >= 2 ? $"1:{p.RiskReward:0.0} ✅ əla"
-                    : p.RiskReward >= 1.3m ? $"1:{p.RiskReward:0.0} yaxşı"
-                    : p.RiskReward >= 1 ? $"1:{p.RiskReward:0.0}"
-                    : $"1:{p.RiskReward:0.0} ⚠️ zəif RR";
-                lines.Add($"▸ Giriş: {FormatPrice(symbol, p.Zone)} ({p.Strength}) — RR {rrText}");
-                lines.Add($"   SL: {FormatPrice(symbol, p.StopLoss)}  |  TP1: {FormatPrice(symbol, p.TakeProfit1)}  |  TP2: {FormatPrice(symbol, p.TakeProfit2)}");
-            }
-            lines.Add("");
-            lines.Add("✅ Ən etibarlı giriş: GÜCLÜ zona + RR 1:2 və yuxarı.");
-            lines.Add("⚠️ Zəif zona və ya RR 1:1-dən aşağı olan zonalarda ehtiyatlı ol.");
-        }
 
         return string.Join("\n", lines);
     }
@@ -869,38 +853,6 @@ public class CoreForexSignalService : IForexSignalService
         return 5;   // standart forex (EUR/USD, GBP/USD və s.)
     }
 
-    // ATR (Average True Range) — son volatilliyin ölçüsü.
-    // SL/TP buferini bazarın hərəkətliliyinə uyğunlaşdırmaq üçün.
-    private static decimal ComputeAtr(List<Candle> candles, int period)
-    {
-        if (candles.Count < 2)
-            return candles.Count > 0 ? candles[^1].High - candles[^1].Low : 0m;
-
-        if (period > candles.Count - 1)
-            period = candles.Count - 1;
-
-        decimal sum = 0m;
-        var count = 0;
-        for (var i = candles.Count - period; i < candles.Count; i++)
-        {
-            if (i <= 0) continue;
-            var high = candles[i].High;
-            var low = candles[i].Low;
-            var prevClose = candles[i - 1].Close;
-            var tr = Math.Max(high - low,
-                     Math.Max(Math.Abs(high - prevClose), Math.Abs(low - prevClose)));
-            sum += tr;
-            count++;
-        }
-
-        return count > 0 ? sum / count : candles[^1].High - candles[^1].Low;
-    }
-
-    private static decimal ClampDecimal(decimal value, decimal lo, decimal hi)
-    {
-        if (lo > hi) (lo, hi) = (hi, lo);   // təhlükəsizlik
-        return value < lo ? lo : value > hi ? hi : value;
-    }
 
     private static decimal RoundPrice(string symbol, decimal price)
         => Math.Round(price, GetDigits(symbol));

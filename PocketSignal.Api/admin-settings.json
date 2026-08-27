@@ -26,12 +26,12 @@
     "AUD/CAD"
   ],
   "forexEnabled": true,
-  "forexTimeframe": "5min",
+  "forexTimeframe": "1min",
   "binaryTimeframe": "1min",
-  "forexActiveSymbol": "USD/CAD",
+  "forexActiveSymbol": "AUD/USD",
   "forexActiveSymbols": [
-    "USD/CAD",
-    "CHF/JPY"
+    "AUD/USD",
+    "EUR/CAD"
   ],
   "forexSymbols": [
     "GBP/JPY",
@@ -67,5 +67,5 @@
   "mt5MaxTradesPerDay": 20,
   "mt5DemoOnly": true,
   "mt5OnePositionPerSymbol": true,
-  "updatedAtUtc": "2026-08-17T22:27:28.2780377Z"
+  "updatedAtUtc": "2026-08-27T11:03:11.9181551Z"
 }
